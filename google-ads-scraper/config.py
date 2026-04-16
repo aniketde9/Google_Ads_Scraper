@@ -12,7 +12,15 @@ WARMUP_DELAY_MAX = 2.5
 TIMEOUT_PAGE_LOAD = 30000
 TIMEOUT_SELECTOR = 8000
 # Longer wait when resolving sponsored blocks after layout/CAPTCHA
-EXTRACT_SPONSORED_TIMEOUT_MS = 12000
+EXTRACT_SPONSORED_TIMEOUT_MS = 15000
+# Extra settle + scroll before reading the SERP (increase after manual CAPTCHA if ads load late).
+EXTRACT_PAGE_SETTLE_SEC = 2.0
+EXTRACT_INITIAL_SCROLL_PAUSE_SEC = 1.5
+# Primary wait for grouped text-ad blocks (`[data-text-ad="1"]`).
+DATA_TEXT_AD_WAIT_MS = 8000
+# After CAPTCHA/consent, re-open SERP if URL is not a Google search page.
+SERP_VERIFY_TIMEOUT_MS = 15000
+SERP_RENAV_MAX_ATTEMPTS = 2
 
 # One browser context + tab for all searches (easier manual CAPTCHA; less isolation).
 PERSISTENT_MODE = True

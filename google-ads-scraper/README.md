@@ -20,7 +20,7 @@ Python scraper for collecting sponsored Google search results from CSV queries.
 
 By default **`PERSISTENT_MODE = True`**: one Chromium context and tab stay open for all CSV rows and iterations; each run navigates with `?q=...` (same effect as using the search bar). Set **`PERSISTENT_MODE = False`** for a fresh incognito context every iteration (stricter isolation, more CAPTCHAs when solving manually).
 
-Sponsored ads are extracted with **`div:has-text("Sponsored")`**, scroll-to-load, `/url?` links, and fallbacks if Google’s DOM depth changes. Tune **`EXTRACT_SPONSORED_TIMEOUT_MS`** in `config.py` if the results load slowly after a CAPTCHA.
+Sponsored extraction prefers **`[data-text-ad="1"]`** (grouped text-ad cards), then the **“Sponsored results”** heading with an ancestor **`div`** scope, then **`uEierd`**, label walks, and a small **JS** fallback. After a **CAPTCHA** flow, **`ensure_on_google_serp`** checks that the URL is a Google **`/search`** page and re-navigates to the query if not (see **`SERP_RENAV_MAX_ATTEMPTS`** / **`SERP_VERIFY_TIMEOUT_MS`**). Tune **`EXTRACT_PAGE_SETTLE_SEC`** if ads load late.
 
 ## If you see `CAPTCHA` in `scraper.log`
 

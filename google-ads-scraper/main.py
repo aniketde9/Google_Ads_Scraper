@@ -111,6 +111,20 @@ async def run() -> int:
                     else:
                         outcome = await run_browser_search(browser, search_query, iteration, logger)
 
+                    if outcome.get("error") == "not_on_search_page":
+                        logger.error(
+                            "Could not confirm Google SERP URL after load or CAPTCHA",
+                            extra={
+                                "event_type": "error",
+                                "payload": {
+                                    "error_type": "NOT_ON_SEARCH_PAGE",
+                                    "query": search_query,
+                                    "iteration": iteration,
+                                },
+                            },
+                        )
+                        continue
+
                     if outcome["captcha"]:
                         captcha_count += 1
                         logger.error(

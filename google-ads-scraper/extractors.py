@@ -8,22 +8,45 @@ import urllib.parse
 import tldextract
 
 
+def _is_google_ad_redirect(href_lower: str) -> bool:
+    """True for outbound click wrappers used on ads (not generic Google properties)."""
+    return "google.com/url" in href_lower or "/url?" in href_lower
+
+
 def is_valid_sponsored_link(href: str | None, display_text: str) -> bool:
-    """Validate sponsored link candidate."""
+    """Validate sponsored link candidate.
+
+    Most Google ads use https://www.google.com/url?q=... — those must not be rejected.
+    """
     if not href:
         return False
-    lower_href = href.lower()
-    if "google.com" in lower_href or "youtube.com" in lower_href:
+    h = href.strip()
+    if h.startswith("//"):
+        h = "https:" + h
+    lower = h.lower()
+    if "youtube.com" in lower:
         return False
-    if not (lower_href.startswith("http://") or lower_href.startswith("https://")):
+    if h.startswith("/url?"):
+        if len(h) < 10 or len(display_text.strip()) < 2:
+            return False
+        return True
+    if _is_google_ad_redirect(lower):
+        if len(h) < 10 or len(display_text.strip()) < 2:
+            return False
+        return True
+    if "google.com" in lower:
         return False
-    if len(href) < 10 or len(display_text.strip()) < 2:
+    if not (lower.startswith("http://") or lower.startswith("https://")):
+        return False
+    if len(h) < 10 or len(display_text.strip()) < 2:
         return False
     return True
 
 
 def unpack_google_redirect_url(url: str) -> str:
     """Unpack Google redirect URL if present."""
+    if url.startswith("/url?"):
+        url = "https://www.google.com" + url
     if "google.com/url" in url:
         parsed = urllib.parse.urlparse(url)
         params = urllib.parse.parse_qs(parsed.query)

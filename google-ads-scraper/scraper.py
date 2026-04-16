@@ -12,6 +12,9 @@ from playwright_stealth import Stealth
 from config import (
     CAPTCHA_ALERT_SOUND,
     CAPTCHA_GRACE_SECONDS,
+    DATA_TEXT_AD_WAIT_MS,
+    EXTRACT_INITIAL_SCROLL_PAUSE_SEC,
+    EXTRACT_PAGE_SETTLE_SEC,
     EXTRACT_SPONSORED_TIMEOUT_MS,
     HEADLESS_MODE,
     HUMAN_MOUSE_AND_SCROLL,
@@ -22,6 +25,8 @@ from config import (
     PROXY_ENABLED,
     PROXY_STRING,
     RETRY_BACKOFF_MULTIPLIER,
+    SERP_RENAV_MAX_ATTEMPTS,
+    SERP_VERIFY_TIMEOUT_MS,
     TIMEOUT_PAGE_LOAD,
     VIEWPORT_HEIGHT,
     VIEWPORT_WIDTH,
@@ -191,51 +196,159 @@ def _append_link_if_sponsored(
     )
 
 
-async def extract_sponsored_ads(page: Page, search_query: str, logger) -> List[Dict[str, str]]:
-    """Extract sponsored links: container :has-text first, then variable-depth label walk."""
-    results: List[Dict[str, str]] = []
-    seen_urls: set[str] = set()
-
+async def _extract_one_link_from_label(
+    label,
+    search_query: str,
+    seen_urls: set[str],
+    results: List[Dict[str, str]],
+    *,
+    min_depth: int,
+    max_depth: int,
+    min_headline_len: int,
+) -> None:
+    """From a visible Sponsored/Ad badge, walk up; first valid ad link per label wins."""
     try:
-        await page.wait_for_selector("text=/Sponsored/i", timeout=EXTRACT_SPONSORED_TIMEOUT_MS)
+        if not await label.is_visible():
+            return
     except Exception:
+        return
+
+    for depth in range(min_depth, max_depth + 1):
         try:
-            await page.wait_for_selector('text="Ad"', timeout=min(4000, EXTRACT_SPONSORED_TIMEOUT_MS))
-        except Exception:
-            pass
-
-    await _scroll_results_for_lazy_ads(page)
-
-    link_sel = 'a[href^="http"], a[href^="//"], a[href^="/url?"]'
-
-    try:
-        containers = await page.locator('div:has-text("Sponsored")').all()
-        for container in containers:
-            try:
-                links = await container.locator(link_sel).all()
-                for link in links[:25]:
+            container = label
+            for _ in range(depth):
+                container = container.locator("..").first
+            links = await container.locator("a[href]").all()
+            for link in links:
+                try:
                     if not await link.is_visible():
                         continue
                     href = await link.get_attribute("href")
                     display_text = await link.inner_text()
-                    _append_link_if_sponsored(
-                        href, display_text, search_query, seen_urls, results
-                    )
+                    if len((display_text or "").strip()) < min_headline_len:
+                        continue
+                    before = len(results)
+                    _append_link_if_sponsored(href, display_text, search_query, seen_urls, results)
+                    if len(results) > before:
+                        return
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+
+def _is_google_search_url(url: str) -> bool:
+    u = (url or "").lower()
+    return "google." in u and "/search" in u
+
+
+async def ensure_on_google_serp(
+    page: Page, encoded_search_query: str, logger, *, after_captcha: bool = False
+) -> bool:
+    """Ensure we are on a real Google SERP (not consent interstitial only). Re-navigate if needed."""
+    payload_extra = {"after_captcha": after_captcha}
+    if _is_google_search_url(page.url):
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=min(8000, SERP_VERIFY_TIMEOUT_MS))
+        except Exception:
+            pass
+        return True
+
+    logger.info(
+        "Not on Google SERP; attempting re-navigation",
+        extra={
+            "event_type": "serp_renavigate",
+            "payload": {**payload_extra, "current_url": page.url or ""},
+        },
+    )
+    target = f"https://www.google.com/search?q={encoded_search_query}&hl=en&gl=us"
+    for attempt in range(1, SERP_RENAV_MAX_ATTEMPTS + 1):
+        try:
+            await page.goto(target, timeout=TIMEOUT_PAGE_LOAD)
+            await page.wait_for_load_state("domcontentloaded")
+            try:
+                await page.wait_for_url("**/search**", timeout=SERP_VERIFY_TIMEOUT_MS)
+            except Exception:
+                pass
+            await asyncio.sleep(2.0 if after_captcha else 1.0)
+            if _is_google_search_url(page.url):
+                logger.info(
+                    "SERP confirmed after re-navigation",
+                    extra={
+                        "event_type": "serp_confirmed",
+                        "payload": {"attempt": attempt, "url": page.url or ""},
+                    },
+                )
+                return True
+        except Exception as exc:
+            logger.error(
+                f"SERP re-navigation failed: {exc}",
+                extra={
+                    "event_type": "serp_renav_error",
+                    "payload": {"attempt": attempt, "error": str(exc)},
+                },
+            )
+    logger.error(
+        "Could not land on Google search results page",
+        extra={"event_type": "serp_verify_failed", "payload": {"url": page.url or ""}},
+    )
+    return False
+
+
+async def _extract_from_data_text_ad(
+    page: Page, search_query: str, seen_urls: set[str], results: List[Dict[str, str]]
+) -> None:
+    """Primary2026 path: grouped text ads use ``data-text-ad="1"`` on each card."""
+    try:
+        loc = page.locator('[data-text-ad="1"]')
+        n = await loc.count()
+        for i in range(n):
+            try:
+                container = loc.nth(i)
+                if not await container.is_visible():
+                    continue
+                link = container.locator("a[data-ved][href]").first
+                if not await link.is_visible():
+                    link = container.locator("a[href]").first
+                    if not await link.is_visible():
+                        continue
+                href = await link.get_attribute("href")
+                headline = ""
+                try:
+                    h3 = container.locator("h3").first
+                    if await h3.is_visible():
+                        headline = (await h3.inner_text()).strip()
+                except Exception:
+                    pass
+                if not headline:
+                    headline = (await link.inner_text()).strip()
+                _append_link_if_sponsored(href, headline, search_query, seen_urls, results)
             except Exception:
                 continue
     except Exception:
         pass
 
-    if not results:
-        try:
-            labels = await page.locator('text="Sponsored"').all()
-            for label in labels:
-                for depth in range(1, 9):
+
+async def _extract_from_sponsored_results_header(
+    page: Page, search_query: str, seen_urls: set[str], results: List[Dict[str, str]]
+) -> None:
+    """Fallback: section header 'Sponsored results' + ancestor scope for links."""
+    try:
+        hdr = page.get_by_text("Sponsored results", exact=True)
+        if await hdr.count() == 0:
+            hdr = page.get_by_text("Sponsored results")
+        if await hdr.count() == 0:
+            return
+        header = hdr.first
+
+        for depth in (3, 4, 5, 6, 8):
+            try:
+                section = header.locator(f"xpath=ancestor::div[{depth}]")
+                if await section.count() == 0:
+                    continue
+                links = await section.locator("a[href]").all()
+                for link in links:
                     try:
-                        container = label
-                        for _ in range(depth):
-                            container = container.locator("..").first
-                        link = container.locator(link_sel).first
                         if not await link.is_visible():
                             continue
                         href = await link.get_attribute("href")
@@ -245,32 +358,171 @@ async def extract_sponsored_ads(page: Page, search_query: str, logger) -> List[D
                         )
                     except Exception:
                         continue
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+async def _extract_from_u_eierd_containers(
+    page: Page, search_query: str, seen_urls: set[str], results: List[Dict[str, str]]
+) -> None:
+    """Known ad wrapper (often ``uEierd``) + Sponsored — class names change; this is best-effort."""
+    try:
+        loc = page.locator('div.uEierd:has-text("Sponsored")')
+        n = await loc.count()
+        for i in range(n):
+            try:
+                container = loc.nth(i)
+                if not await container.is_visible():
+                    continue
+                for link in await container.locator("a[href]").all():
+                    if not await link.is_visible():
+                        continue
+                    href = await link.get_attribute("href")
+                    display_text = await link.inner_text()
+                    _append_link_if_sponsored(href, display_text, search_query, seen_urls, results)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+
+_SPONSORED_JS_FALLBACK = """
+() => {
+  const rows = [];
+  document.querySelectorAll('*').forEach((el) => {
+    const t = (el.textContent || '').trim();
+    if (t !== 'Sponsored' && t !== 'Ad') return;
+    let node = el;
+    for (let i = 0; i < 8 && node; i++) {
+      node.querySelectorAll('a[href]').forEach((link) => {
+        let h = link.getAttribute('href') || '';
+        if (!h) return;
+        if (h.startsWith('/')) {
+          try { h = new URL(h, window.location.href).href; } catch (e) {}
+        }
+        if (h.startsWith('//')) h = 'https:' + h;
+        const tx = (link.innerText || '').trim();
+        if (tx.length >= 2) rows.push({ url: h, display_text: tx });
+      });
+      node = node.parentElement;
+    }
+  });
+  return rows;
+}
+"""
+
+
+async def extract_sponsored_ads(page: Page, search_query: str, logger) -> List[Dict[str, str]]:
+    """Sponsored extraction: ``data-text-ad``, 'Sponsored results' block, then legacy fallbacks."""
+    results: List[Dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    try:
+        await page.wait_for_selector('[data-text-ad="1"]', timeout=DATA_TEXT_AD_WAIT_MS)
+    except Exception:
+        try:
+            await page.wait_for_selector("text=Sponsored results", timeout=min(8000, EXTRACT_SPONSORED_TIMEOUT_MS))
         except Exception:
-            pass
+            try:
+                await page.wait_for_selector('text="Sponsored"', timeout=min(6000, EXTRACT_SPONSORED_TIMEOUT_MS))
+            except Exception:
+                try:
+                    await page.wait_for_selector('text="Ad"', timeout=min(4000, EXTRACT_SPONSORED_TIMEOUT_MS))
+                except Exception:
+                    pass
+
+    try:
+        await asyncio.sleep(EXTRACT_PAGE_SETTLE_SEC)
+        await page.evaluate("window.scrollBy(0, 600)")
+        await asyncio.sleep(EXTRACT_INITIAL_SCROLL_PAUSE_SEC)
+    except Exception:
+        pass
+
+    await _scroll_results_for_lazy_ads(page)
+
+    try:
+        await _extract_from_data_text_ad(page, search_query, seen_urls, results)
+    except Exception as exc:
+        logger.error(
+            f"data-text-ad extract failed: {exc}",
+            extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+        )
 
     if not results:
         try:
-            labels = await page.locator('text="Ad"').all()
-            for label in labels:
-                for depth in range(2, 8):
-                    try:
-                        container = label
-                        for _ in range(depth):
-                            container = container.locator("..").first
-                        link = container.locator(link_sel).first
-                        if not await link.is_visible():
-                            continue
-                        href = await link.get_attribute("href")
-                        display_text = await link.inner_text()
-                        if len((display_text or "").strip()) < 3:
-                            continue
-                        _append_link_if_sponsored(
-                            href, display_text, search_query, seen_urls, results
-                        )
-                    except Exception:
+            await _extract_from_sponsored_results_header(page, search_query, seen_urls, results)
+        except Exception as exc:
+            logger.error(
+                f"Sponsored results header extract failed: {exc}",
+                extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+            )
+
+    try:
+        await _extract_from_u_eierd_containers(page, search_query, seen_urls, results)
+    except Exception as exc:
+        logger.error(
+            f"uEierd extract pass failed: {exc}",
+            extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+        )
+
+    try:
+        for label in await page.locator('text="Sponsored"').all():
+            await _extract_one_link_from_label(
+                label,
+                search_query,
+                seen_urls,
+                results,
+                min_depth=2,
+                max_depth=8,
+                min_headline_len=2,
+            )
+    except Exception as exc:
+        logger.error(
+            f"Sponsored label pass failed: {exc}",
+            extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+        )
+
+    if not results:
+        try:
+            for label in await page.locator('text="Ad"').all():
+                await _extract_one_link_from_label(
+                    label,
+                    search_query,
+                    seen_urls,
+                    results,
+                    min_depth=2,
+                    max_depth=8,
+                    min_headline_len=4,
+                )
+        except Exception as exc:
+            logger.error(
+                f"Ad label fallback failed: {exc}",
+                extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+            )
+
+    if not results:
+        try:
+            raw = await page.evaluate(_SPONSORED_JS_FALLBACK)
+            if isinstance(raw, list):
+                for item in raw:
+                    if not isinstance(item, dict):
                         continue
-        except Exception:
-            pass
+                    href = item.get("url")
+                    display_text = item.get("display_text") or ""
+                    _append_link_if_sponsored(
+                        str(href) if href else None,
+                        str(display_text),
+                        search_query,
+                        seen_urls,
+                        results,
+                    )
+        except Exception as exc:
+            logger.error(
+                f"JS sponsored fallback failed: {exc}",
+                extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+            )
 
     logger.info(
         "Sponsored extraction completed",
@@ -305,14 +557,21 @@ async def navigate_search_and_extract(
 
     page_text = await page.content()
     page_title = await page.title()
+    captcha_resolved = False
     if is_blocked_or_captcha_page(page_text, page.url, page_title):
         can_wait = PAUSE_FOR_MANUAL_CAPTCHA and not HEADLESS_MODE
         if can_wait:
             cleared = await _offer_manual_captcha_solve(page, logger)
             if not cleared:
                 return {"results": [], "captcha": True, "error": "captcha_detected"}
+            captcha_resolved = True
         else:
             return {"results": [], "captcha": True, "error": "captcha_detected"}
+
+    if not await ensure_on_google_serp(
+        page, search_query, logger, after_captcha=captcha_resolved
+    ):
+        return {"results": [], "captcha": False, "error": "not_on_search_page"}
 
     await asyncio.sleep(random.uniform(0.25, 0.65))
     results = await extract_sponsored_ads(page, search_query, logger)
