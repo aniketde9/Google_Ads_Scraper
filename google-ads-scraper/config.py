@@ -42,6 +42,13 @@ RETRY_BACKOFF_MULTIPLIER = 2
 # CAPTCHA handling
 MAX_CAPTCHA_ENCOUNTERS = 3
 CAPTCHA_COOLDOWN = 60
+# If Google shows a verification page in headed mode, wait for you to solve it in the
+# browser, then press Enter in the terminal to continue (no effect when HEADLESS_MODE True).
+PAUSE_FOR_MANUAL_CAPTCHA = True
+# Beep / system alert when a verification page is detected (Windows: winsound; else terminal bell).
+CAPTCHA_ALERT_SOUND = True
+# Seconds to solve in the browser before we re-check the page (then Enter if still blocked).
+CAPTCHA_GRACE_SECONDS = 30
 
 # Compliance
 COMPLIANCE_MODE = True

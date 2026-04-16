@@ -49,3 +49,18 @@ def setup_logger() -> logging.Logger:
 def get_random_user_agent() -> str:
     """Return random user-agent string."""
     return random.choice(USER_AGENT_POOL)
+
+
+def play_captcha_alert() -> None:
+    """Notify that a browser verification step needs attention."""
+    try:
+        import winsound
+
+        winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        for _ in range(3):
+            winsound.Beep(1000, 220)
+            winsound.Beep(750, 220)
+    except Exception:
+        for _ in range(6):
+            print("\a", end="", flush=True)
+            time.sleep(0.2)

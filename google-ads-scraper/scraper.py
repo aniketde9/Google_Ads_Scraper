@@ -10,8 +10,12 @@ from playwright.async_api import Browser, Page
 from playwright_stealth import Stealth
 
 from config import (
+    CAPTCHA_ALERT_SOUND,
+    CAPTCHA_GRACE_SECONDS,
+    HEADLESS_MODE,
     HUMAN_MOUSE_AND_SCROLL,
     MAX_RETRIES_ON_FAILURE,
+    PAUSE_FOR_MANUAL_CAPTCHA,
     POST_SEARCH_SETTLE_MAX,
     POST_SEARCH_SETTLE_MIN,
     PROXY_ENABLED,
@@ -26,7 +30,7 @@ from config import (
     WARMUP_GOOGLE_HOME,
 )
 from extractors import is_valid_sponsored_link, unpack_google_redirect_url
-from utils import get_random_user_agent
+from utils import get_random_user_agent, play_captcha_alert
 
 STEALTH = Stealth()
 
@@ -55,6 +59,68 @@ def is_blocked_or_captcha_page(html_text: str, page_url: str, page_title: str = 
     if "our systems have detected unusual traffic" in lowered:
         return True
     return False
+
+
+async def _offer_manual_captcha_solve(page: Page, logger) -> bool:
+    """Alert user, allow a grace period to verify in-browser, then re-check (Enter if still blocked)."""
+    logger.info(
+        "Waiting for manual CAPTCHA / verification in browser",
+        extra={
+            "event_type": "manual_captcha_wait",
+            "payload": {
+                "message": "Solve challenge in browser",
+                "grace_seconds": CAPTCHA_GRACE_SECONDS,
+                "sound": CAPTCHA_ALERT_SOUND,
+            },
+        },
+    )
+    print(
+        "\n"
+        + "=" * 62
+        + "\n"
+        "  Google showed a verification page — complete it in the Chromium window.\n"
+        f"  You have {CAPTCHA_GRACE_SECONDS} seconds; listen for the alert sound.\n"
+        + "=" * 62
+        + "\n",
+        flush=True,
+    )
+    if CAPTCHA_ALERT_SOUND:
+        await asyncio.to_thread(play_captcha_alert)
+
+    await asyncio.sleep(CAPTCHA_GRACE_SECONDS)
+
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=10000)
+    except Exception:
+        pass
+    await asyncio.sleep(0.5)
+    page_text = await page.content()
+    page_title = await page.title()
+    if not is_blocked_or_captcha_page(page_text, page.url, page_title):
+        logger.info(
+            "Verification page cleared after grace period",
+            extra={"event_type": "manual_captcha_cleared", "payload": {}},
+        )
+        print("  Page looks clear — continuing scrape.\n", flush=True)
+        return True
+
+    print(
+        "\n  Still on a block/verification page after the grace period.\n"
+        "  Finish any remaining steps in the browser, then press ENTER here.\n",
+        flush=True,
+    )
+    if CAPTCHA_ALERT_SOUND:
+        await asyncio.to_thread(play_captcha_alert)
+
+    await asyncio.to_thread(input, "Press ENTER when search results are visible... ")
+    try:
+        await page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    await asyncio.sleep(0.75)
+    page_text = await page.content()
+    page_title = await page.title()
+    return not is_blocked_or_captcha_page(page_text, page.url, page_title)
 
 
 async def _humanize_after_navigation(page: Page) -> None:
@@ -158,7 +224,13 @@ async def run_browser_search(
             page_text = await page.content()
             page_title = await page.title()
             if is_blocked_or_captcha_page(page_text, page.url, page_title):
-                return {"results": [], "captcha": True, "error": "captcha_detected"}
+                can_wait = PAUSE_FOR_MANUAL_CAPTCHA and not HEADLESS_MODE
+                if can_wait:
+                    cleared = await _offer_manual_captcha_solve(page, logger)
+                    if not cleared:
+                        return {"results": [], "captcha": True, "error": "captcha_detected"}
+                else:
+                    return {"results": [], "captcha": True, "error": "captcha_detected"}
 
             results = await extract_sponsored_ads(page, search_query, logger)
             return {"results": results, "captcha": False, "error": ""}

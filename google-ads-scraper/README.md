@@ -27,6 +27,8 @@ Searching **US results from a non-US IP** (e.g. India → Austin) triggers block
 - If blocks continue locally, set `USE_SYSTEM_CHROME = True` (Google Chrome must be installed).
 - **Stealth:** this repo uses `playwright-stealth` **v2** (`Stealth().apply_stealth_async(context)`). Older snippets that use `stealth_async` are for a different API.
 
+- **Manual verification:** with headed mode (`HEADLESS_MODE = False`), set `PAUSE_FOR_MANUAL_CAPTCHA = True` in `config.py`. When Google shows a challenge, the scraper plays an **alert sound** (Windows beeps; otherwise terminal bell), waits **`CAPTCHA_GRACE_SECONDS`** (default 30) for you to verify in the browser, then continues automatically if the page cleared. If not, press **Enter** in the terminal after finishing. Toggle with `CAPTCHA_ALERT_SOUND` / adjust time with `CAPTCHA_GRACE_SECONDS`.
+
 - Wait between sessions if you hit repeated challenges; the scraper backs off after several CAPTCHA events.
 
 ## Legal notice
