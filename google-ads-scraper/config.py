@@ -11,6 +11,11 @@ WARMUP_DELAY_MIN = 1.0
 WARMUP_DELAY_MAX = 2.5
 TIMEOUT_PAGE_LOAD = 30000
 TIMEOUT_SELECTOR = 8000
+# Longer wait when resolving sponsored blocks after layout/CAPTCHA
+EXTRACT_SPONSORED_TIMEOUT_MS = 12000
+
+# One browser context + tab for all searches (easier manual CAPTCHA; less isolation).
+PERSISTENT_MODE = True
 VIEWPORT_WIDTH = 1920
 VIEWPORT_HEIGHT = 1080
 

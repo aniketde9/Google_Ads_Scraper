@@ -23,12 +23,13 @@ from config import (
     ITERATIONS_PER_QUERY,
     MAX_CAPTCHA_ENCOUNTERS,
     OUTPUT_FILE,
+    PERSISTENT_MODE,
     USE_SYSTEM_CHROME,
 )
 from csv_handler import format_query, load_input_csv, write_results_csv
 from deduplicator import DeduplicationIndex
 from extractors import current_timestamp, extract_domain, extract_website_name
-from scraper import run_browser_search
+from scraper import navigate_search_and_extract, open_persistent_session, run_browser_search
 from utils import setup_logger
 
 LEGAL_DISCLAIMER = """
@@ -71,7 +72,18 @@ async def run() -> int:
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**launch_kwargs)
+        persistent_context = None
         try:
+            if PERSISTENT_MODE:
+                persistent_context, persistent_page = await open_persistent_session(browser)
+                logger.info(
+                    "Persistent session started",
+                    extra={
+                        "event_type": "persistent_session",
+                        "payload": {"message": "Single tab will run all searches until done."},
+                    },
+                )
+
             for row_index, row in enumerate(rows):
                 profession = row["profession"]
                 location = row["location"]
@@ -92,7 +104,12 @@ async def run() -> int:
                         },
                     )
 
-                    outcome = await run_browser_search(browser, search_query, iteration, logger)
+                    if PERSISTENT_MODE:
+                        outcome = await navigate_search_and_extract(
+                            persistent_page, search_query, iteration, logger
+                        )
+                    else:
+                        outcome = await run_browser_search(browser, search_query, iteration, logger)
 
                     if outcome["captcha"]:
                         captcha_count += 1
@@ -167,6 +184,8 @@ async def run() -> int:
                         )
                     )
         finally:
+            if persistent_context:
+                await persistent_context.close()
             await browser.close()
 
     write_results_csv(OUTPUT_FILE, all_results)

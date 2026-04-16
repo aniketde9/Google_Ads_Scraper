@@ -6,12 +6,13 @@ import asyncio
 import random
 from typing import Dict, List
 
-from playwright.async_api import Browser, Page
+from playwright.async_api import Browser, BrowserContext, Page
 from playwright_stealth import Stealth
 
 from config import (
     CAPTCHA_ALERT_SOUND,
     CAPTCHA_GRACE_SECONDS,
+    EXTRACT_SPONSORED_TIMEOUT_MS,
     HEADLESS_MODE,
     HUMAN_MOUSE_AND_SCROLL,
     MAX_RETRIES_ON_FAILURE,
@@ -22,7 +23,6 @@ from config import (
     PROXY_STRING,
     RETRY_BACKOFF_MULTIPLIER,
     TIMEOUT_PAGE_LOAD,
-    TIMEOUT_SELECTOR,
     VIEWPORT_HEIGHT,
     VIEWPORT_WIDTH,
     WARMUP_DELAY_MAX,
@@ -33,6 +33,13 @@ from extractors import is_valid_sponsored_link, unpack_google_redirect_url
 from utils import get_random_user_agent, play_captcha_alert
 
 STEALTH = Stealth()
+
+
+def _dedupe_url_key(url: str) -> str:
+    u = (url or "").lower().strip()
+    if not u:
+        return ""
+    return u.split("?")[0].rstrip("/")
 
 
 def is_blocked_or_captcha_page(html_text: str, page_url: str, page_title: str = "") -> bool:
@@ -144,41 +151,126 @@ async def _humanize_after_navigation(page: Page) -> None:
     except Exception:
         pass
 
-async def extract_sponsored_ads(page: Page, search_query: str, logger) -> List[Dict[str, str]]:
-    """Extract sponsored links using text-based labels only."""
-    results: List[Dict[str, str]] = []
-
+async def _scroll_results_for_lazy_ads(page: Page) -> None:
+    """Reveal ads that load after scroll."""
     try:
-        await page.wait_for_selector('text="Sponsored"', timeout=TIMEOUT_SELECTOR)
+        await page.evaluate("window.scrollTo(0, 0)")
+        await asyncio.sleep(0.2)
+        for delta in (380, 520, 700, 400):
+            await page.evaluate("window.scrollBy(0, arguments[0])", delta)
+            await asyncio.sleep(0.35)
     except Exception:
         pass
 
-    for label_text in ("Sponsored", "Ad"):
-        labels = await page.locator(f'text="{label_text}"').all()
-        for label in labels:
+
+def _append_link_if_sponsored(
+    href: str | None,
+    display_text: str,
+    search_query: str,
+    seen_urls: set[str],
+    results: List[Dict[str, str]],
+) -> None:
+    if not href:
+        return
+    href_norm = href
+    if href_norm.startswith("//"):
+        href_norm = "https:" + href_norm
+    if not is_valid_sponsored_link(href_norm, display_text):
+        return
+    actual_url = unpack_google_redirect_url(href_norm)
+    key = _dedupe_url_key(actual_url)
+    if not key or key in seen_urls:
+        return
+    seen_urls.add(key)
+    results.append(
+        {
+            "url": actual_url,
+            "display_text": display_text,
+            "source_query": search_query,
+        }
+    )
+
+
+async def extract_sponsored_ads(page: Page, search_query: str, logger) -> List[Dict[str, str]]:
+    """Extract sponsored links: container :has-text first, then variable-depth label walk."""
+    results: List[Dict[str, str]] = []
+    seen_urls: set[str] = set()
+
+    try:
+        await page.wait_for_selector("text=/Sponsored/i", timeout=EXTRACT_SPONSORED_TIMEOUT_MS)
+    except Exception:
+        try:
+            await page.wait_for_selector('text="Ad"', timeout=min(4000, EXTRACT_SPONSORED_TIMEOUT_MS))
+        except Exception:
+            pass
+
+    await _scroll_results_for_lazy_ads(page)
+
+    link_sel = 'a[href^="http"], a[href^="//"], a[href^="/url?"]'
+
+    try:
+        containers = await page.locator('div:has-text("Sponsored")').all()
+        for container in containers:
             try:
-                container = label.locator(".. >> .. >> ..").first
-                link = container.locator("a[href]").first
-                if not await link.is_visible():
-                    continue
-
-                href = await link.get_attribute("href")
-                display_text = await link.inner_text()
-                if not is_valid_sponsored_link(href, display_text):
-                    continue
-
-                actual_url = unpack_google_redirect_url(href or "")
-                results.append(
-                    {
-                        "url": actual_url,
-                        "display_text": display_text,
-                        "source_query": search_query,
-                    }
-                )
+                links = await container.locator(link_sel).all()
+                for link in links[:25]:
+                    if not await link.is_visible():
+                        continue
+                    href = await link.get_attribute("href")
+                    display_text = await link.inner_text()
+                    _append_link_if_sponsored(
+                        href, display_text, search_query, seen_urls, results
+                    )
             except Exception:
                 continue
-        if results:
-            break
+    except Exception:
+        pass
+
+    if not results:
+        try:
+            labels = await page.locator('text="Sponsored"').all()
+            for label in labels:
+                for depth in range(1, 9):
+                    try:
+                        container = label
+                        for _ in range(depth):
+                            container = container.locator("..").first
+                        link = container.locator(link_sel).first
+                        if not await link.is_visible():
+                            continue
+                        href = await link.get_attribute("href")
+                        display_text = await link.inner_text()
+                        _append_link_if_sponsored(
+                            href, display_text, search_query, seen_urls, results
+                        )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
+
+    if not results:
+        try:
+            labels = await page.locator('text="Ad"').all()
+            for label in labels:
+                for depth in range(2, 8):
+                    try:
+                        container = label
+                        for _ in range(depth):
+                            container = container.locator("..").first
+                        link = container.locator(link_sel).first
+                        if not await link.is_visible():
+                            continue
+                        href = await link.get_attribute("href")
+                        display_text = await link.inner_text()
+                        if len((display_text or "").strip()) < 3:
+                            continue
+                        _append_link_if_sponsored(
+                            href, display_text, search_query, seen_urls, results
+                        )
+                    except Exception:
+                        continue
+        except Exception:
+            pass
 
     logger.info(
         "Sponsored extraction completed",
@@ -190,24 +282,64 @@ async def extract_sponsored_ads(page: Page, search_query: str, logger) -> List[D
     return results
 
 
+def _new_context_options() -> dict:
+    opts: dict = {
+        "user_agent": get_random_user_agent(),
+        "locale": "en-US",
+        "timezone_id": "America/Chicago",
+        "viewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
+    }
+    if PROXY_ENABLED:
+        opts["proxy"] = {"server": PROXY_STRING}
+    return opts
+
+
+async def navigate_search_and_extract(
+    page: Page, search_query: str, iteration: int, logger
+) -> Dict[str, object]:
+    """Load Google SERP on an existing page, handle CAPTCHA, return sponsored links."""
+    url = f"https://www.google.com/search?q={search_query}&hl=en&gl=us"
+    await page.goto(url, timeout=TIMEOUT_PAGE_LOAD)
+    await page.wait_for_load_state("domcontentloaded")
+    await _humanize_after_navigation(page)
+
+    page_text = await page.content()
+    page_title = await page.title()
+    if is_blocked_or_captcha_page(page_text, page.url, page_title):
+        can_wait = PAUSE_FOR_MANUAL_CAPTCHA and not HEADLESS_MODE
+        if can_wait:
+            cleared = await _offer_manual_captcha_solve(page, logger)
+            if not cleared:
+                return {"results": [], "captcha": True, "error": "captcha_detected"}
+        else:
+            return {"results": [], "captcha": True, "error": "captcha_detected"}
+
+    await asyncio.sleep(random.uniform(0.25, 0.65))
+    results = await extract_sponsored_ads(page, search_query, logger)
+    return {"results": results, "captcha": False, "error": ""}
+
+
+async def open_persistent_session(browser: Browser) -> tuple[BrowserContext, Page]:
+    """Single context + tab for the whole run (warmup optional)."""
+    context = await browser.new_context(**_new_context_options())
+    await STEALTH.apply_stealth_async(context)
+    page = await context.new_page()
+    if WARMUP_GOOGLE_HOME:
+        await page.goto("https://www.google.com/?hl=en&gl=us", timeout=TIMEOUT_PAGE_LOAD)
+        await page.wait_for_load_state("domcontentloaded")
+        await asyncio.sleep(random.uniform(WARMUP_DELAY_MIN, WARMUP_DELAY_MAX))
+    return context, page
+
+
 async def run_browser_search(
     browser: Browser, search_query: str, iteration: int, logger
 ) -> Dict[str, object]:
-    """Run one iteration for a single query and return result metadata."""
+    """Run one iteration in a fresh incognito context (spec default when PERSISTENT_MODE off)."""
     last_error = ""
     for attempt in range(1, MAX_RETRIES_ON_FAILURE + 1):
         context = None
         try:
-            context_options = {
-                "user_agent": get_random_user_agent(),
-                "locale": "en-US",
-                "timezone_id": "America/Chicago",
-                "viewport": {"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
-            }
-            if PROXY_ENABLED:
-                context_options["proxy"] = {"server": PROXY_STRING}
-
-            context = await browser.new_context(**context_options)
+            context = await browser.new_context(**_new_context_options())
             await STEALTH.apply_stealth_async(context)
             page = await context.new_page()
 
@@ -216,24 +348,7 @@ async def run_browser_search(
                 await page.wait_for_load_state("domcontentloaded")
                 await asyncio.sleep(random.uniform(WARMUP_DELAY_MIN, WARMUP_DELAY_MAX))
 
-            url = f"https://www.google.com/search?q={search_query}&hl=en&gl=us"
-            await page.goto(url, timeout=TIMEOUT_PAGE_LOAD)
-            await page.wait_for_load_state("domcontentloaded")
-            await _humanize_after_navigation(page)
-
-            page_text = await page.content()
-            page_title = await page.title()
-            if is_blocked_or_captcha_page(page_text, page.url, page_title):
-                can_wait = PAUSE_FOR_MANUAL_CAPTCHA and not HEADLESS_MODE
-                if can_wait:
-                    cleared = await _offer_manual_captcha_solve(page, logger)
-                    if not cleared:
-                        return {"results": [], "captcha": True, "error": "captcha_detected"}
-                else:
-                    return {"results": [], "captcha": True, "error": "captcha_detected"}
-
-            results = await extract_sponsored_ads(page, search_query, logger)
-            return {"results": results, "captcha": False, "error": ""}
+            return await navigate_search_and_extract(page, search_query, iteration, logger)
         except Exception as exc:
             last_error = str(exc)
             logger.error(
