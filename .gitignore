@@ -1,0 +1,22 @@
+# Python
+google-ads-scraper/.venv/
+google-ads-scraper/__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+*.so.Python
+
+# Run outputs (regenerate locally)
+google-ads-scraper/scraper.log
+google-ads-scraper/results.csv
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/
+
+# Secrets / local env
+.env
+*.local
