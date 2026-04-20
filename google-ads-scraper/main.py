@@ -71,18 +71,10 @@ async def run() -> int:
         launch_kwargs["channel"] = "chrome"
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(**launch_kwargs)
-        persistent_context = None
+        shared_browser = None
         try:
-            if PERSISTENT_MODE:
-                persistent_context, persistent_page = await open_persistent_session(browser)
-                logger.info(
-                    "Persistent session started",
-                    extra={
-                        "event_type": "persistent_session",
-                        "payload": {"message": "Single tab will run all searches until done."},
-                    },
-                )
+            if not PERSISTENT_MODE:
+                shared_browser = await playwright.chromium.launch(**launch_kwargs)
 
             for row_index, row in enumerate(rows):
                 profession = row["profession"]
@@ -90,104 +82,129 @@ async def run() -> int:
                 pincode = row["pincode"]
                 search_query = format_query(profession, location, pincode)
 
-                for iteration in range(1, ITERATIONS_PER_QUERY + 1):
+                row_browser = None
+                row_context = None
+                row_page = None
+                if PERSISTENT_MODE:
+                    row_browser = await playwright.chromium.launch(**launch_kwargs)
+                    row_context, row_page = await open_persistent_session(row_browser)
                     logger.info(
-                        "Query started",
+                        "Persistent session started",
                         extra={
-                            "event_type": "query_started",
+                            "event_type": "persistent_session",
                             "payload": {
+                                "message": "Single tab will run all searches for this pincode.",
+                                "pincode": pincode,
+                            },
+                        },
+                    )
+
+                try:
+                    for iteration in range(1, ITERATIONS_PER_QUERY + 1):
+                        logger.info(
+                            "Query started",
+                            extra={
+                                "event_type": "query_started",
+                                "payload": {
+                                    "profession": profession,
+                                    "location": location,
+                                    "pincode": pincode,
+                                    "iteration": iteration,
+                                },
+                            },
+                        )
+
+                        if PERSISTENT_MODE:
+                            outcome = await navigate_search_and_extract(
+                                row_page, search_query, iteration, logger
+                            )
+                        else:
+                            outcome = await run_browser_search(
+                                shared_browser, search_query, iteration, logger
+                            )
+
+                        if outcome.get("error") == "not_on_search_page":
+                            logger.error(
+                                "Could not confirm Google SERP URL after load or CAPTCHA",
+                                extra={
+                                    "event_type": "error",
+                                    "payload": {
+                                        "error_type": "NOT_ON_SEARCH_PAGE",
+                                        "query": search_query,
+                                        "iteration": iteration,
+                                    },
+                                },
+                            )
+                            continue
+
+                        if outcome["captcha"]:
+                            captcha_count += 1
+                            logger.error(
+                                "CAPTCHA detected",
+                                extra={
+                                    "event_type": "error",
+                                    "payload": {
+                                        "error_type": "CAPTCHA",
+                                        "query": search_query,
+                                        "iteration": iteration,
+                                        "captcha_count": captcha_count,
+                                    },
+                                },
+                            )
+                            if captcha_count >= MAX_CAPTCHA_ENCOUNTERS:
+                                logger.error(
+                                    "CAPTCHA threshold reached; cooling down",
+                                    extra={
+                                        "event_type": "captcha_cooldown",
+                                        "payload": {"cooldown_seconds": CAPTCHA_COOLDOWN},
+                                    },
+                                )
+                                await asyncio.sleep(CAPTCHA_COOLDOWN)
+                                return 1
+                            await asyncio.sleep(CAPTCHA_COOLDOWN)
+                            continue
+
+                        new_records = 0
+                        for link in outcome["results"]:
+                            url = link["url"]
+                            domain = extract_domain(url)
+                            result = {
                                 "profession": profession,
                                 "location": location,
                                 "pincode": pincode,
-                                "iteration": iteration,
-                            },
-                        },
-                    )
+                                "website_name": extract_website_name(link["display_text"]),
+                                "url": url,
+                                "domain": domain,
+                                "run_number": iteration,
+                                "timestamp": current_timestamp(),
+                            }
+                            if not dedupe.is_duplicate(result):
+                                all_results[location].append(result)
+                                new_records += 1
 
-                    if PERSISTENT_MODE:
-                        outcome = await navigate_search_and_extract(
-                            persistent_page, search_query, iteration, logger
-                        )
-                    else:
-                        outcome = await run_browser_search(browser, search_query, iteration, logger)
-
-                    if outcome.get("error") == "not_on_search_page":
-                        logger.error(
-                            "Could not confirm Google SERP URL after load or CAPTCHA",
+                        logger.info(
+                            "Iteration completed",
                             extra={
-                                "event_type": "error",
+                                "event_type": "results_extracted",
                                 "payload": {
-                                    "error_type": "NOT_ON_SEARCH_PAGE",
                                     "query": search_query,
-                                    "iteration": iteration,
+                                    "sponsored_links_found": len(outcome["results"]),
+                                    "unique_new_records": new_records,
                                 },
                             },
                         )
-                        continue
 
-                    if outcome["captcha"]:
-                        captcha_count += 1
-                        logger.error(
-                            "CAPTCHA detected",
-                            extra={
-                                "event_type": "error",
-                                "payload": {
-                                    "error_type": "CAPTCHA",
-                                    "query": search_query,
-                                    "iteration": iteration,
-                                    "captcha_count": captcha_count,
-                                },
-                            },
-                        )
-                        if captcha_count >= MAX_CAPTCHA_ENCOUNTERS:
-                            logger.error(
-                                "CAPTCHA threshold reached; cooling down",
-                                extra={
-                                    "event_type": "captcha_cooldown",
-                                    "payload": {"cooldown_seconds": CAPTCHA_COOLDOWN},
-                                },
+                        await asyncio.sleep(
+                            random.uniform(
+                                DELAY_BETWEEN_ITERATIONS_MIN,
+                                DELAY_BETWEEN_ITERATIONS_MAX,
                             )
-                            await asyncio.sleep(CAPTCHA_COOLDOWN)
-                            return 1
-                        await asyncio.sleep(CAPTCHA_COOLDOWN)
-                        continue
-
-                    new_records = 0
-                    for link in outcome["results"]:
-                        url = link["url"]
-                        domain = extract_domain(url)
-                        result = {
-                            "profession": profession,
-                            "location": location,
-                            "pincode": pincode,
-                            "website_name": extract_website_name(link["display_text"]),
-                            "url": url,
-                            "domain": domain,
-                            "run_number": iteration,
-                            "timestamp": current_timestamp(),
-                        }
-                        if not dedupe.is_duplicate(result):
-                            all_results[location].append(result)
-                            new_records += 1
-
-                    logger.info(
-                        "Iteration completed",
-                        extra={
-                            "event_type": "results_extracted",
-                            "payload": {
-                                "query": search_query,
-                                "sponsored_links_found": len(outcome["results"]),
-                                "unique_new_records": new_records,
-                            },
-                        },
-                    )
-
-                    await asyncio.sleep(
-                        random.uniform(
-                            DELAY_BETWEEN_ITERATIONS_MIN,
-                            DELAY_BETWEEN_ITERATIONS_MAX,
                         )
-                    )
+                finally:
+                    if row_context:
+                        await row_context.close()
+                    if row_browser:
+                        await row_browser.close()
 
                 if row_index < len(rows) - 1:
                     await asyncio.sleep(
@@ -198,9 +215,8 @@ async def run() -> int:
                         )
                     )
         finally:
-            if persistent_context:
-                await persistent_context.close()
-            await browser.close()
+            if shared_browser:
+                await shared_browser.close()
 
     write_results_csv(OUTPUT_FILE, all_results)
     logger.info(
