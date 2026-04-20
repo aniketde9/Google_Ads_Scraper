@@ -61,6 +61,7 @@ async def run() -> int:
     rows = load_input_csv(INPUT_FILE)
     all_results: Dict[str, List[Dict[str, str]]] = defaultdict(list)
     dedupe = DeduplicationIndex()
+    first_result_by_domain: Dict[str, Dict[str, str]] = {}
     captcha_count = 0
 
     launch_kwargs = {
@@ -175,12 +176,22 @@ async def run() -> int:
                                 "website_name": extract_website_name(link["display_text"]),
                                 "url": url,
                                 "domain": domain,
+                                "appearance_count": "0",
                                 "run_number": iteration,
                                 "timestamp": current_timestamp(),
                             }
-                            if not dedupe.is_duplicate(result):
+                            is_new_result, appearance_count, domain_key = dedupe.register_sighting(
+                                result
+                            )
+                            if is_new_result:
+                                result["appearance_count"] = str(appearance_count)
                                 all_results[location].append(result)
+                                first_result_by_domain[domain_key] = result
                                 new_records += 1
+                            else:
+                                existing_result = first_result_by_domain.get(domain_key)
+                                if existing_result:
+                                    existing_result["appearance_count"] = str(appearance_count)
 
                         logger.info(
                             "Iteration completed",

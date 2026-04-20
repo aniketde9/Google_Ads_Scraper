@@ -15,6 +15,7 @@ OUTPUT_HEADERS = [
     "website_name",
     "url",
     "domain",
+    "appearance_count",
     "run_number",
     "timestamp",
 ]
