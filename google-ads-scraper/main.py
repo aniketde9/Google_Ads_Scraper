@@ -31,7 +31,7 @@ from config import (
 from csv_handler import format_query, load_input_csv, write_results_csv
 from deduplicator import DeduplicationIndex
 from extractors import current_timestamp, extract_domain, extract_website_name
-from scraper import navigate_search_and_extract, open_persistent_session, run_browser_search
+from scraper import navigate_search_and_extract, open_persistent_session
 from utils import setup_logger
 
 LEGAL_DISCLAIMER = """
@@ -78,9 +78,7 @@ async def run() -> int:
         persistent_context = None
         persistent_page = None
         try:
-            if not PERSISTENT_MODE:
-                shared_browser = await playwright.chromium.launch(**launch_kwargs)
-            else:
+            if PERSISTENT_MODE:
                 shared_browser = await playwright.chromium.launch(**launch_kwargs)
                 persistent_context, persistent_page = await open_persistent_session(shared_browser)
                 logger.info(
@@ -96,150 +94,196 @@ async def run() -> int:
                 location = row["location"]
                 pincode = row["pincode"]
                 search_query = format_query(profession, location, pincode)
+                row_browser = None
+                row_context = None
+                row_page = None
+                if not PERSISTENT_MODE:
+                    row_browser = await playwright.chromium.launch(**launch_kwargs)
+                    row_context, row_page = await open_persistent_session(row_browser)
 
-                for iteration in range(1, ITERATIONS_PER_QUERY + 1):
-                    logger.info(
-                        "Query started",
-                        extra={
-                            "event_type": "query_started",
-                            "payload": {
+                try:
+                    for iteration in range(1, ITERATIONS_PER_QUERY + 1):
+                        logger.info(
+                            "Query started",
+                            extra={
+                                "event_type": "query_started",
+                                "payload": {
+                                    "profession": profession,
+                                    "location": location,
+                                    "pincode": pincode,
+                                    "iteration": iteration,
+                                },
+                            },
+                        )
+
+                        if PERSISTENT_MODE:
+                            outcome = {"results": [], "captcha": False, "error": ""}
+                            for attempt in range(1, PERSISTENT_NAV_RETRIES + 1):
+                                try:
+                                    outcome = await navigate_search_and_extract(
+                                        persistent_page, search_query, iteration, logger
+                                    )
+                                    break
+                                except Exception as exc:
+                                    outcome = {
+                                        "results": [],
+                                        "captcha": False,
+                                        "error": str(exc),
+                                    }
+                                    logger.error(
+                                        f"Persistent search failed on attempt {attempt}",
+                                        extra={
+                                            "event_type": "search_error",
+                                            "payload": {
+                                                "query": search_query,
+                                                "iteration": iteration,
+                                                "attempt": attempt,
+                                                "error": str(exc),
+                                            },
+                                        },
+                                    )
+                                    if attempt < PERSISTENT_NAV_RETRIES:
+                                        await asyncio.sleep(RETRY_BACKOFF_MULTIPLIER**attempt)
+                        else:
+                            outcome = {"results": [], "captcha": False, "error": ""}
+                            for attempt in range(1, PERSISTENT_NAV_RETRIES + 1):
+                                try:
+                                    outcome = await navigate_search_and_extract(
+                                        row_page, search_query, iteration, logger
+                                    )
+                                    break
+                                except Exception as exc:
+                                    outcome = {
+                                        "results": [],
+                                        "captcha": False,
+                                        "error": str(exc),
+                                    }
+                                    logger.error(
+                                        f"Per-query search failed on attempt {attempt}",
+                                        extra={
+                                            "event_type": "search_error",
+                                            "payload": {
+                                                "query": search_query,
+                                                "iteration": iteration,
+                                                "attempt": attempt,
+                                                "error": str(exc),
+                                            },
+                                        },
+                                    )
+                                    if attempt < PERSISTENT_NAV_RETRIES:
+                                        await asyncio.sleep(RETRY_BACKOFF_MULTIPLIER**attempt)
+
+                        if outcome.get("error") == "not_on_search_page":
+                            logger.error(
+                                "Could not confirm Google SERP URL after load or CAPTCHA",
+                                extra={
+                                    "event_type": "error",
+                                    "payload": {
+                                        "error_type": "NOT_ON_SEARCH_PAGE",
+                                        "query": search_query,
+                                        "iteration": iteration,
+                                    },
+                                },
+                            )
+                            continue
+
+                        if outcome["captcha"]:
+                            captcha_count += 1
+                            logger.error(
+                                "CAPTCHA detected",
+                                extra={
+                                    "event_type": "error",
+                                    "payload": {
+                                        "error_type": "CAPTCHA",
+                                        "query": search_query,
+                                        "iteration": iteration,
+                                        "captcha_count": captcha_count,
+                                    },
+                                },
+                            )
+                            if captcha_count >= MAX_CAPTCHA_ENCOUNTERS:
+                                logger.error(
+                                    "CAPTCHA threshold reached; cooling down",
+                                    extra={
+                                        "event_type": "captcha_cooldown",
+                                        "payload": {"cooldown_seconds": CAPTCHA_COOLDOWN},
+                                    },
+                                )
+                                await asyncio.sleep(CAPTCHA_COOLDOWN)
+                                return 1
+                            await asyncio.sleep(CAPTCHA_COOLDOWN)
+                            continue
+
+                        new_records = 0
+                        for link in outcome["results"]:
+                            url = link["url"]
+                            domain = extract_domain(url)
+                            result = {
                                 "profession": profession,
                                 "location": location,
                                 "pincode": pincode,
-                                "iteration": iteration,
-                            },
-                        },
-                    )
-
-                    if PERSISTENT_MODE:
-                        outcome = {"results": [], "captcha": False, "error": ""}
-                        for attempt in range(1, PERSISTENT_NAV_RETRIES + 1):
-                            try:
-                                outcome = await navigate_search_and_extract(
-                                    persistent_page, search_query, iteration, logger
-                                )
-                                break
-                            except Exception as exc:
-                                outcome = {
-                                    "results": [],
-                                    "captcha": False,
-                                    "error": str(exc),
-                                }
-                                logger.error(
-                                    f"Persistent search failed on attempt {attempt}",
-                                    extra={
-                                        "event_type": "search_error",
-                                        "payload": {
-                                            "query": search_query,
-                                            "iteration": iteration,
-                                            "attempt": attempt,
-                                            "error": str(exc),
-                                        },
-                                    },
-                                )
-                                if attempt < PERSISTENT_NAV_RETRIES:
-                                    await asyncio.sleep(RETRY_BACKOFF_MULTIPLIER**attempt)
-                    else:
-                        outcome = await run_browser_search(
-                            shared_browser, search_query, iteration, logger
-                        )
-
-                    if outcome.get("error") == "not_on_search_page":
-                        logger.error(
-                            "Could not confirm Google SERP URL after load or CAPTCHA",
-                            extra={
-                                "event_type": "error",
-                                "payload": {
-                                    "error_type": "NOT_ON_SEARCH_PAGE",
-                                    "query": search_query,
-                                    "iteration": iteration,
-                                },
-                            },
-                        )
-                        continue
-
-                    if outcome["captcha"]:
-                        captcha_count += 1
-                        logger.error(
-                            "CAPTCHA detected",
-                            extra={
-                                "event_type": "error",
-                                "payload": {
-                                    "error_type": "CAPTCHA",
-                                    "query": search_query,
-                                    "iteration": iteration,
-                                    "captcha_count": captcha_count,
-                                },
-                            },
-                        )
-                        if captcha_count >= MAX_CAPTCHA_ENCOUNTERS:
-                            logger.error(
-                                "CAPTCHA threshold reached; cooling down",
-                                extra={
-                                    "event_type": "captcha_cooldown",
-                                    "payload": {"cooldown_seconds": CAPTCHA_COOLDOWN},
-                                },
+                                "website_name": extract_website_name(link["display_text"]),
+                                "url": url,
+                                "domain": domain,
+                                "appearance_count": "0",
+                                "run_number": iteration,
+                                "timestamp": current_timestamp(),
+                            }
+                            is_new_result, appearance_count, domain_key = dedupe.register_sighting(
+                                result
                             )
-                            await asyncio.sleep(CAPTCHA_COOLDOWN)
-                            return 1
-                        await asyncio.sleep(CAPTCHA_COOLDOWN)
-                        continue
+                            if is_new_result:
+                                result["appearance_count"] = str(appearance_count)
+                                all_results[location].append(result)
+                                first_result_by_domain[domain_key] = result
+                                new_records += 1
+                            else:
+                                existing_result = first_result_by_domain.get(domain_key)
+                                if existing_result:
+                                    existing_result["appearance_count"] = str(appearance_count)
 
-                    new_records = 0
-                    for link in outcome["results"]:
-                        url = link["url"]
-                        domain = extract_domain(url)
-                        result = {
-                            "profession": profession,
-                            "location": location,
-                            "pincode": pincode,
-                            "website_name": extract_website_name(link["display_text"]),
-                            "url": url,
-                            "domain": domain,
-                            "appearance_count": "0",
-                            "run_number": iteration,
-                            "timestamp": current_timestamp(),
-                        }
-                        is_new_result, appearance_count, domain_key = dedupe.register_sighting(
-                            result
-                        )
-                        if is_new_result:
-                            result["appearance_count"] = str(appearance_count)
-                            all_results[location].append(result)
-                            first_result_by_domain[domain_key] = result
-                            new_records += 1
-                        else:
-                            existing_result = first_result_by_domain.get(domain_key)
-                            if existing_result:
-                                existing_result["appearance_count"] = str(appearance_count)
-
-                    logger.info(
-                        "Iteration completed",
-                        extra={
-                            "event_type": "results_extracted",
-                            "payload": {
-                                "query": search_query,
-                                "sponsored_links_found": len(outcome["results"]),
-                                "unique_new_records": new_records,
+                        logger.info(
+                            "Iteration completed",
+                            extra={
+                                "event_type": "results_extracted",
+                                "payload": {
+                                    "query": search_query,
+                                    "sponsored_links_found": len(outcome["results"]),
+                                    "unique_new_records": new_records,
+                                },
                             },
-                        },
-                    )
-
-                    await asyncio.sleep(
-                        random.uniform(
-                            DELAY_BETWEEN_ITERATIONS_MIN,
-                            DELAY_BETWEEN_ITERATIONS_MAX,
                         )
-                    )
+
+                        await asyncio.sleep(
+                            random.uniform(
+                                DELAY_BETWEEN_ITERATIONS_MIN,
+                                DELAY_BETWEEN_ITERATIONS_MAX,
+                            )
+                        )
+                finally:
+                    if row_context:
+                        await row_context.close()
+                    if row_browser:
+                        await row_browser.close()
 
                 if row_index < len(rows) - 1:
-                    await asyncio.sleep(
-                        DELAY_BETWEEN_QUERIES
-                        + random.uniform(
-                            DELAY_BETWEEN_QUERIES_JITTER_MIN,
-                            DELAY_BETWEEN_QUERIES_JITTER_MAX,
+                    if PERSISTENT_MODE:
+                        await asyncio.sleep(
+                            DELAY_BETWEEN_QUERIES
+                            + random.uniform(
+                                DELAY_BETWEEN_QUERIES_JITTER_MIN,
+                                DELAY_BETWEEN_QUERIES_JITTER_MAX,
+                            )
                         )
-                    )
+                    else:
+                        logger.info(
+                            "Waiting before next query browser restart",
+                            extra={
+                                "event_type": "query_pause",
+                                "payload": {"pause_seconds": 30},
+                            },
+                        )
+                        await asyncio.sleep(30)
         finally:
             if persistent_context:
                 await persistent_context.close()

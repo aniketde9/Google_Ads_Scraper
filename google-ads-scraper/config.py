@@ -22,8 +22,8 @@ DATA_TEXT_AD_WAIT_MS = 8000
 SERP_VERIFY_TIMEOUT_MS = 15000
 SERP_RENAV_MAX_ATTEMPTS = 2
 
-# One browser context + tab for all searches (easier manual CAPTCHA; less isolation).
-PERSISTENT_MODE = True
+# Run each query in a fresh browser session (restart per CSV row).
+PERSISTENT_MODE = False
 VIEWPORT_WIDTH = 1920
 VIEWPORT_HEIGHT = 1080
 
