@@ -49,7 +49,7 @@ def load_input_csv(input_file: str) -> List[Dict[str, str]]:
 
 def format_query(profession: str, location: str, pincode: str) -> str:
     """Build and URL-encode search query."""
-    query = f"{profession} near {location} {pincode}".strip()
+    query = f"{profession} at {location} near {pincode}".strip()
     return urllib.parse.quote_plus(query)
 
 

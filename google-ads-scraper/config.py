@@ -9,7 +9,7 @@ USE_SYSTEM_CHROME = False
 WARMUP_GOOGLE_HOME = True
 WARMUP_DELAY_MIN = 1.0
 WARMUP_DELAY_MAX = 2.5
-TIMEOUT_PAGE_LOAD = 30000
+TIMEOUT_PAGE_LOAD = 45000
 TIMEOUT_SELECTOR = 8000
 # Longer wait when resolving sponsored blocks after layout/CAPTCHA
 EXTRACT_SPONSORED_TIMEOUT_MS = 15000
@@ -39,9 +39,8 @@ POST_SEARCH_SETTLE_MAX = 1.5
 HUMAN_MOUSE_AND_SCROLL = True
 
 # Scraping settings
-# Conservative test profile (harder IPs / CAPTCHA):2 iterations, slower pacing.
-# For full spec runs, set ITERATIONS_PER_QUERY = 10 and tighten delays if your IP/proxy is stable.
-ITERATIONS_PER_QUERY = 2
+# Default 5 iterations per CSV row; reduce if you hit CAPTCHA often, or tune delays for your IP/proxy.
+ITERATIONS_PER_QUERY = 5
 DELAY_BETWEEN_ITERATIONS_MIN = 8
 DELAY_BETWEEN_ITERATIONS_MAX = 12
 DELAY_BETWEEN_QUERIES = 5
@@ -51,6 +50,7 @@ DELAY_BETWEEN_QUERIES_JITTER_MAX = 2.5
 # Retry settings
 MAX_RETRIES_ON_FAILURE = 3
 RETRY_BACKOFF_MULTIPLIER = 2
+PERSISTENT_NAV_RETRIES = 3
 
 # CAPTCHA handling
 MAX_CAPTCHA_ENCOUNTERS = 3
