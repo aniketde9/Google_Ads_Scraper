@@ -77,3 +77,42 @@ LOG_FILE = "scraper.log"
 
 # Deduplication
 NORMALIZE_URLS = True
+
+# --- Email enrichment (post-process results.csv) ---
+EMAIL_ENRICH_ENABLED = True
+EMAIL_ENRICH_INPUT = "results.csv"
+EMAIL_ENRICH_OUTPUT = "results_enriched.csv"
+EMAIL_ENRICH_LOG = "email_enrich.log"
+EMAIL_ENRICH_MAX_PAGES_PER_DOMAIN = 8
+EMAIL_ENRICH_NAV_TIMEOUT_MS = 25000
+EMAIL_ENRICH_CONCURRENCY = 2
+EMAIL_ENRICH_DELAY_MIN = 1.0
+EMAIL_ENRICH_DELAY_MAX = 2.5
+EMAIL_ENRICH_USE_HEADLESS = True
+EMAIL_ENRICH_CHROME_ARGS = [
+    "--disable-blink-features=AutomationControlled",
+]
+EMAIL_ENRICH_USE_ROLE_GUESSES = True
+# Role permutations when crawl finds no email (info + support first; deduped at runtime).
+EMAIL_ENRICH_ROLE_LOCALPARTS = [
+    "info",
+    "support",
+    "contact",
+    "hello",
+    "office",
+]
+EMAIL_ENRICH_USE_HEADLINE_GUESS = True
+EMAIL_ENRICH_MAX_GUESS_CANDIDATES = 24
+EMAIL_ENRICH_SMTP_ENABLED = False
+# Truth Reactor runs per domain (one verify_safe per candidate, in order, up to this cap).
+EMAIL_ENRICH_MAX_SMTP_PROBES_PER_DOMAIN = 32
+# If True, stop after a strong SMTP deliverable (skips verifying remaining candidates).
+EMAIL_ENRICH_VERIFY_EARLY_STOP = False
+EMAIL_ENRICH_SMTP_TIMEOUT_SECONDS = 15.0
+EMAIL_ENRICH_SMTP_CATCHALL_TIMEOUT_SECONDS = 12.0
+EMAIL_ENRICH_REACTOR_LIST_UPDATE_INTERVAL_SECONDS = 604800.0
+# Empty strings = default under ./data/
+EMAIL_ENRICH_REACTOR_CACHE_DB = ""
+EMAIL_ENRICH_REACTOR_LIST_DIR = ""
+# Only used when EMAIL_ENRICH_VERIFY_EARLY_STOP and SMTP are enabled.
+EMAIL_ENRICH_VERIFY_EARLY_STOP_CONFIDENCE = 88.0

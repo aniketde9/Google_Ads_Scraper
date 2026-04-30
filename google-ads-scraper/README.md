@@ -16,6 +16,22 @@ Python scraper for collecting sponsored Google search results from CSV queries.
 4. Run:
    - `python main.py`
 
+## Email enrichment (`results.csv` → `results_enriched.csv`)
+
+After the main scraper writes `results.csv`, you can crawl advertiser sites, extract or guess contact emails, and optionally verify them (DNS / disposable lists / optional SMTP).
+
+1. In `config.py`, set **`EMAIL_ENRICH_ENABLED = True`** (or pass **`--force`** on the CLI).
+2. Defaults: **`EMAIL_ENRICH_INPUT`** = `results.csv`, **`EMAIL_ENRICH_OUTPUT`** = `results_enriched.csv`, log file **`email_enrich.log`**. **`enriched_email`** is only filled after Truth Reactor **`verify_safe`** (no unverified fallbacks). Role guesses include **`info@`** and **`support@`** first; tune **`EMAIL_ENRICH_MAX_SMTP_PROBES_PER_DOMAIN`** and **`EMAIL_ENRICH_VERIFY_EARLY_STOP`** (default off = verify every candidate up to the cap).
+3. Run from this folder:
+   - `python enrich_results_emails.py`
+   - `python enrich_results_emails.py --limit 10` (first 10 unique domains)
+   - `python enrich_results_emails.py --dry-run` (no Playwright or verification)
+   - `python enrich_results_emails.py --input path/to/results.csv --output path/out.csv`
+
+**SMTP verification** is **off by default** (`EMAIL_ENRICH_SMTP_ENABLED = False`). Many networks block outbound port 25; enabling SMTP sends RCPT probes that can upset mail admins or be treated as abuse. Only turn it on where you have permission and a suitable network. The Truth Reactor caches disposable/role lists under **`data/`** inside this project (created on first run).
+
+**Ethics / compliance:** Use enrichment only for lawful, permitted purposes. Respect site terms, rate limits, and privacy. This does not bypass contact forms or logins.
+
 ## Browser session (`PERSISTENT_MODE`)
 
 By default **`PERSISTENT_MODE = True`**: one Chromium context and tab stay open for all CSV rows and iterations; each run navigates with `?q=...` (same effect as using the search bar). Set **`PERSISTENT_MODE = False`** for a fresh incognito context every iteration (stricter isolation, more CAPTCHAs when solving manually).
