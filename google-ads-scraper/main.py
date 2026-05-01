@@ -80,7 +80,9 @@ async def run() -> int:
         try:
             if PERSISTENT_MODE:
                 shared_browser = await playwright.chromium.launch(**launch_kwargs)
-                persistent_context, persistent_page = await open_persistent_session(shared_browser)
+                persistent_context, persistent_page = await open_persistent_session(
+                    shared_browser, logger
+                )
                 logger.info(
                     "Persistent session started",
                     extra={
@@ -99,7 +101,9 @@ async def run() -> int:
                 row_page = None
                 if not PERSISTENT_MODE:
                     row_browser = await playwright.chromium.launch(**launch_kwargs)
-                    row_context, row_page = await open_persistent_session(row_browser)
+                    row_context, row_page = await open_persistent_session(
+                        row_browser, logger
+                    )
 
                 try:
                     for iteration in range(1, ITERATIONS_PER_QUERY + 1):

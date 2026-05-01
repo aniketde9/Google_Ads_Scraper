@@ -23,6 +23,9 @@ from config import (
     HEADLESS_MODE,
     HUMAN_MOUSE_AND_SCROLL,
     MAX_RETRIES_ON_FAILURE,
+    NAV_GOTO_MAX_ATTEMPTS,
+    NAV_GOTO_RETRY_BASE_DELAY_SEC,
+    NAV_GOTO_RETRY_MAX_DELAY_SEC,
     PAUSE_FOR_MANUAL_CAPTCHA,
     POST_SEARCH_SETTLE_MAX,
     POST_SEARCH_SETTLE_MIN,
@@ -34,6 +37,7 @@ from config import (
     TIMEOUT_PAGE_LOAD,
     VIEWPORT_HEIGHT,
     VIEWPORT_WIDTH,
+    WARMUP_CONTINUE_ON_FAILURE,
     WARMUP_DELAY_MAX,
     WARMUP_DELAY_MIN,
     WARMUP_GOOGLE_HOME,
@@ -53,6 +57,64 @@ def _dedupe_url_key(url: str) -> str:
     if not u:
         return ""
     return u.split("?")[0].rstrip("/")
+
+
+async def _goto_with_retries(
+    page: Page,
+    url: str,
+    logger,
+    *,
+    context: str,
+) -> None:
+    """page.goto with exponential backoff; raises last error if all attempts fail."""
+    last_exc: Exception | None = None
+    for attempt in range(1, NAV_GOTO_MAX_ATTEMPTS + 1):
+        try:
+            await page.goto(url, timeout=TIMEOUT_PAGE_LOAD)
+            try:
+                await page.wait_for_load_state(
+                    "domcontentloaded",
+                    timeout=min(20_000, TIMEOUT_PAGE_LOAD),
+                )
+            except Exception:
+                pass
+            if attempt > 1:
+                logger.info(
+                    "Navigation succeeded after retry",
+                    extra={
+                        "event_type": "nav_recovered",
+                        "payload": {
+                            "context": context,
+                            "attempt": attempt,
+                            "url_preview": (url or "")[:160],
+                        },
+                    },
+                )
+            return
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                f"{context}: goto failed (attempt {attempt}/{NAV_GOTO_MAX_ATTEMPTS}): {exc}",
+                extra={
+                    "event_type": "nav_retry",
+                    "payload": {
+                        "context": context,
+                        "attempt": attempt,
+                        "error": str(exc),
+                        "url_preview": (url or "")[:160],
+                    },
+                },
+            )
+            if attempt >= NAV_GOTO_MAX_ATTEMPTS:
+                break
+            delay = min(
+                NAV_GOTO_RETRY_MAX_DELAY_SEC,
+                NAV_GOTO_RETRY_BASE_DELAY_SEC
+                * (RETRY_BACKOFF_MULTIPLIER ** (attempt - 1)),
+            )
+            await asyncio.sleep(delay + random.uniform(0, 0.75))
+    assert last_exc is not None
+    raise last_exc
 
 
 def is_blocked_or_captcha_page(html_text: str, page_url: str, page_title: str = "") -> bool:
@@ -520,8 +582,12 @@ async def ensure_on_google_serp(
     target = f"https://www.google.com/search?q={encoded_search_query}&hl=en&gl=us"
     for attempt in range(1, SERP_RENAV_MAX_ATTEMPTS + 1):
         try:
-            await page.goto(target, timeout=TIMEOUT_PAGE_LOAD)
-            await page.wait_for_load_state("domcontentloaded")
+            await _goto_with_retries(
+                page,
+                target,
+                logger,
+                context=f"SERP re-navigation ({attempt}/{SERP_RENAV_MAX_ATTEMPTS})",
+            )
             try:
                 await page.wait_for_url("**/search**", timeout=SERP_VERIFY_TIMEOUT_MS)
             except Exception:
@@ -856,8 +922,12 @@ async def navigate_search_and_extract(
 ) -> Dict[str, object]:
     """Load Google SERP on an existing page, handle CAPTCHA, return sponsored links."""
     url = f"https://www.google.com/search?q={search_query}&hl=en&gl=us"
-    await page.goto(url, timeout=TIMEOUT_PAGE_LOAD)
-    await page.wait_for_load_state("domcontentloaded")
+    await _goto_with_retries(
+        page,
+        url,
+        logger,
+        context=f"SERP load (iteration {iteration})",
+    )
     await _humanize_after_navigation(page)
 
     page_text = await page.content()
@@ -883,15 +953,33 @@ async def navigate_search_and_extract(
     return {"results": results, "captcha": False, "error": ""}
 
 
-async def open_persistent_session(browser: Browser) -> tuple[BrowserContext, Page]:
+async def open_persistent_session(
+    browser: Browser, logger
+) -> tuple[BrowserContext, Page]:
     """Single context + tab for the whole run (warmup optional)."""
     context = await browser.new_context(**_new_context_options())
     await STEALTH.apply_stealth_async(context)
     page = await context.new_page()
     if WARMUP_GOOGLE_HOME:
-        await page.goto("https://www.google.com/?hl=en&gl=us", timeout=TIMEOUT_PAGE_LOAD)
-        await page.wait_for_load_state("domcontentloaded")
-        await asyncio.sleep(random.uniform(WARMUP_DELAY_MIN, WARMUP_DELAY_MAX))
+        try:
+            await _goto_with_retries(
+                page,
+                "https://www.google.com/?hl=en&gl=us",
+                logger,
+                context="Warmup google.com",
+            )
+            await asyncio.sleep(random.uniform(WARMUP_DELAY_MIN, WARMUP_DELAY_MAX))
+        except Exception as exc:
+            if not WARMUP_CONTINUE_ON_FAILURE:
+                await context.close()
+                raise
+            logger.warning(
+                f"Warmup skipped after retries; continuing with blank tab: {exc}",
+                extra={
+                    "event_type": "warmup_skipped",
+                    "payload": {"error": str(exc)},
+                },
+            )
     return context, page
 
 
@@ -908,9 +996,26 @@ async def run_browser_search(
             page = await context.new_page()
 
             if WARMUP_GOOGLE_HOME:
-                await page.goto("https://www.google.com/?hl=en&gl=us", timeout=TIMEOUT_PAGE_LOAD)
-                await page.wait_for_load_state("domcontentloaded")
-                await asyncio.sleep(random.uniform(WARMUP_DELAY_MIN, WARMUP_DELAY_MAX))
+                try:
+                    await _goto_with_retries(
+                        page,
+                        "https://www.google.com/?hl=en&gl=us",
+                        logger,
+                        context="Warmup google.com (fresh context)",
+                    )
+                    await asyncio.sleep(
+                        random.uniform(WARMUP_DELAY_MIN, WARMUP_DELAY_MAX)
+                    )
+                except Exception as exc:
+                    if not WARMUP_CONTINUE_ON_FAILURE:
+                        raise
+                    logger.warning(
+                        f"Warmup skipped after retries; continuing: {exc}",
+                        extra={
+                            "event_type": "warmup_skipped",
+                            "payload": {"error": str(exc)},
+                        },
+                    )
 
             return await navigate_search_and_extract(page, search_query, iteration, logger)
         except Exception as exc:

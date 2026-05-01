@@ -58,6 +58,12 @@ DELAY_BETWEEN_QUERIES_JITTER_MAX = 2.5
 MAX_RETRIES_ON_FAILURE = 3
 RETRY_BACKOFF_MULTIPLIER = 2
 PERSISTENT_NAV_RETRIES = 3
+# Per-goto retries for transient DNS/network errors (e.g. net::ERR_NAME_NOT_RESOLVED).
+NAV_GOTO_MAX_ATTEMPTS = 5
+NAV_GOTO_RETRY_BASE_DELAY_SEC = 1.5
+NAV_GOTO_RETRY_MAX_DELAY_SEC = 25.0
+# If google.com warmup fails after all goto retries, continue with a blank tab.
+WARMUP_CONTINUE_ON_FAILURE = True
 
 # CAPTCHA handling
 MAX_CAPTCHA_ENCOUNTERS = 3
