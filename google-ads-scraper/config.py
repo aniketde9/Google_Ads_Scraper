@@ -18,6 +18,13 @@ EXTRACT_PAGE_SETTLE_SEC = 2.0
 EXTRACT_INITIAL_SCROLL_PAUSE_SEC = 1.5
 # Primary wait for grouped text-ad blocks (`[data-text-ad="1"]`).
 DATA_TEXT_AD_WAIT_MS = 8000
+
+# Sponsored Places / local pack (Maps carousel) — second pass after classic text ads.
+EXTRACT_PLACES_SPONSORED_ENABLED = True
+EXTRACT_PLACES_SCROLL_ROUNDS = 4
+EXTRACT_PLACES_MAX_LINK_CANDIDATES = 60
+# If True, only keep local/Maps tiles that show a Sponsored (or Ad) disclosure in the card.
+EXTRACT_PLACES_REQUIRE_SPONSORED_LABEL = True
 # After CAPTCHA/consent, re-open SERP if URL is not a Google search page.
 SERP_VERIFY_TIMEOUT_MS = 15000
 SERP_RENAV_MAX_ATTEMPTS = 2

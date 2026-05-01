@@ -36,7 +36,11 @@ After the main scraper writes `results.csv`, you can crawl advertiser sites, ext
 
 By default **`PERSISTENT_MODE = True`**: one Chromium context and tab stay open for all CSV rows and iterations; each run navigates with `?q=...` (same effect as using the search bar). Set **`PERSISTENT_MODE = False`** for a fresh incognito context every iteration (stricter isolation, more CAPTCHAs when solving manually).
 
-Sponsored extraction prefers **`[data-text-ad="1"]`** (grouped text-ad cards), then the **“Sponsored results”** heading with an ancestor **`div`** scope, then **`uEierd`**, label walks, and a small **JS** fallback. After a **CAPTCHA** flow, **`ensure_on_google_serp`** checks that the URL is a Google **`/search`** page and re-navigates to the query if not (see **`SERP_RENAV_MAX_ATTEMPTS`** / **`SERP_VERIFY_TIMEOUT_MS`**). Tune **`EXTRACT_PAGE_SETTLE_SEC`** if ads load late.
+Sponsored extraction prefers **`[data-text-ad="1"]`** (grouped text-ad cards), then the **“Sponsored results”** heading with an ancestor **`div`** scope, then **`uEierd`**, label walks, and a small **JS** fallback. After that, a **Sponsored Places / local pack** pass runs when **`EXTRACT_PLACES_SPONSORED_ENABLED`** is true: horizontal carousel scrolling, Playwright extraction of **`/maps/place`** (and similar) links with preference for an **external website** link in the same card when present, plus a small **JS supplement** for Maps anchors. **`scraper.log`** includes **`places_links_added`** on the results event.
+
+For **Maps-only** rows (no external site URL), the CSV **`domain`** column uses a stable synthetic value such as **`place-<slug-from-path>`** or **`place-<hash>`** so deduplication does not collapse every place to **`google.com`**. **`EXTRACT_PLACES_REQUIRE_SPONSORED_LABEL`** (default **True**) keeps only local tiles that show a **Sponsored** or **Ad** disclosure in the card (Playwright pass and JS supplement). Set it **False** to include organic local-pack Maps links again. Disable the whole pass with **`EXTRACT_PLACES_SPONSORED_ENABLED = False`** if Google changes layout.
+
+After a **CAPTCHA** flow, **`ensure_on_google_serp`** checks that the URL is a Google **`/search`** page and re-navigates to the query if not (see **`SERP_RENAV_MAX_ATTEMPTS`** / **`SERP_VERIFY_TIMEOUT_MS`**). Tune **`EXTRACT_PAGE_SETTLE_SEC`** if ads load late.
 
 ## If you see `CAPTCHA` in `scraper.log`
 

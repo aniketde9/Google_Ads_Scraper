@@ -15,6 +15,10 @@ from config import (
     DATA_TEXT_AD_WAIT_MS,
     EXTRACT_INITIAL_SCROLL_PAUSE_SEC,
     EXTRACT_PAGE_SETTLE_SEC,
+    EXTRACT_PLACES_MAX_LINK_CANDIDATES,
+    EXTRACT_PLACES_REQUIRE_SPONSORED_LABEL,
+    EXTRACT_PLACES_SCROLL_ROUNDS,
+    EXTRACT_PLACES_SPONSORED_ENABLED,
     EXTRACT_SPONSORED_TIMEOUT_MS,
     HEADLESS_MODE,
     HUMAN_MOUSE_AND_SCROLL,
@@ -34,7 +38,11 @@ from config import (
     WARMUP_DELAY_MIN,
     WARMUP_GOOGLE_HOME,
 )
-from extractors import is_valid_sponsored_link, unpack_google_redirect_url
+from extractors import (
+    is_valid_places_sponsored_link,
+    is_valid_sponsored_link,
+    unpack_google_redirect_url,
+)
 from utils import get_random_user_agent, play_captcha_alert
 
 STEALTH = Stealth()
@@ -194,6 +202,254 @@ def _append_link_if_sponsored(
             "source_query": search_query,
         }
     )
+
+
+def _append_link_if_places(
+    href: str | None,
+    display_text: str,
+    search_query: str,
+    seen_urls: set[str],
+    results: List[Dict[str, str]],
+) -> None:
+    if not href:
+        return
+    href_norm = href
+    if href_norm.startswith("//"):
+        href_norm = "https:" + href_norm
+    if href_norm.startswith("/") and not href_norm.startswith("//"):
+        href_norm = "https://www.google.com" + href_norm
+    if not is_valid_places_sponsored_link(href_norm, display_text):
+        return
+    actual_url = unpack_google_redirect_url(href_norm)
+    key = _dedupe_url_key(actual_url)
+    if not key or key in seen_urls:
+        return
+    seen_urls.add(key)
+    results.append(
+        {
+            "url": actual_url,
+            "display_text": display_text,
+            "source_query": search_query,
+        }
+    )
+
+
+async def _scroll_local_carousels(page: Page, rounds: int) -> None:
+    """Horizontal scroll for local / Places carousels (lazy tiles)."""
+    for _ in range(max(1, rounds)):
+        try:
+            await page.evaluate(
+                """
+                () => {
+                  let n = 0;
+                  const cap = 24;
+                  document.querySelectorAll('[role="list"], [role="listbox"]').forEach((el) => {
+                    if (n >= cap) return;
+                    if (el.scrollWidth > el.clientWidth + 12) {
+                      el.scrollBy(720, 0);
+                      n++;
+                    }
+                  });
+                  document.querySelectorAll('div').forEach((el) => {
+                    if (n >= cap) return;
+                    if (el.scrollWidth > el.clientWidth + 64) {
+                      el.scrollBy(560, 0);
+                      n++;
+                    }
+                  });
+                }
+                """
+            )
+        except Exception:
+            pass
+        await asyncio.sleep(0.35)
+
+
+# Runs in browser on the Maps anchor element.
+_PLACES_CARD_LOOKS_SPONSORED_JS = """
+(el) => {
+  const hasExactBadge = (root) => {
+    if (!root || !root.querySelectorAll) return false;
+    for (const s of root.querySelectorAll('span, div, label')) {
+      const t = (s.textContent || '').trim();
+      if (t === 'Sponsored' || t === 'Ad') return true;
+    }
+    return false;
+  };
+  const card = el.closest('[role="article"]');
+  if (card) {
+    if (hasExactBadge(card)) return true;
+    const head = (card.innerText || '').slice(0, 500);
+    if (/\\bSponsored\\b/i.test(head)) return true;
+  }
+  let n = el;
+  for (let i = 0; i < 12 && n; i++) {
+    if (hasExactBadge(n)) return true;
+    n = n.parentElement;
+  }
+  return false;
+}
+"""
+
+
+async def _places_link_has_sponsored_disclosure(link, require: bool) -> bool:
+    if not require:
+        return True
+    try:
+        return bool(await link.evaluate(_PLACES_CARD_LOOKS_SPONSORED_JS))
+    except Exception:
+        return False
+
+
+async def _extract_sponsored_places(
+    page: Page,
+    search_query: str,
+    seen_urls: set[str],
+    results: List[Dict[str, str]],
+    logger,
+    max_candidates: int,
+    require_sponsored_label: bool,
+) -> None:
+    """Maps / local-pack tiles: only sponsored-labeled cards if require_sponsored_label; prefer website link in card."""
+    cap = max(8, max_candidates)
+    try:
+        maps_locator = page.locator(
+            'a[href*="/maps/place"], a[href*="maps.google"], '
+            'a[href*="google.com/maps"], a[href*="/maps/search"]'
+        )
+        n = await maps_locator.count()
+        for i in range(min(n, cap)):
+            try:
+                link = maps_locator.nth(i)
+                if not await link.is_visible():
+                    continue
+                href = await link.get_attribute("href")
+                if not href:
+                    continue
+                if not await _places_link_has_sponsored_disclosure(
+                    link, require_sponsored_label
+                ):
+                    continue
+                title = ""
+                container = None
+                for depth in range(3, 10):
+                    try:
+                        node = link
+                        for _ in range(depth):
+                            node = node.locator("..").first
+                        h3 = node.locator("h3").first
+                        if await h3.count() > 0:
+                            try:
+                                if await h3.is_visible():
+                                    title = (await h3.inner_text()).strip()
+                                    if title:
+                                        container = node
+                                        break
+                            except Exception:
+                                pass
+                    except Exception:
+                        continue
+                if not title:
+                    try:
+                        title = (await link.inner_text()).strip()
+                    except Exception:
+                        title = ""
+                if len(title) < 2:
+                    title = "Place"
+                if container is None:
+                    try:
+                        container = link.locator("xpath=ancestor::div[6]")
+                    except Exception:
+                        container = link
+
+                picked = False
+                try:
+                    card_links = await container.locator("a[href]").all()
+                except Exception:
+                    card_links = []
+                for al in card_links:
+                    try:
+                        if not await al.is_visible():
+                            continue
+                        h2 = await al.get_attribute("href")
+                        if not h2:
+                            continue
+                        tx = (await al.inner_text()).strip() or title
+                        before = len(results)
+                        _append_link_if_sponsored(
+                            h2, tx, search_query, seen_urls, results
+                        )
+                        if len(results) > before:
+                            picked = True
+                            break
+                    except Exception:
+                        continue
+                if not picked:
+                    _append_link_if_places(
+                        href, title, search_query, seen_urls, results
+                    )
+            except Exception:
+                continue
+    except Exception as exc:
+        logger.error(
+            f"sponsored places extract failed: {exc}",
+            extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+        )
+
+
+# Argument: requireSponsored (boolean)
+_PLACES_JS_SUPPLEMENT = """
+(requireSponsored) => {
+  const looksSponsored = (el) => {
+    const hasExactBadge = (root) => {
+      if (!root || !root.querySelectorAll) return false;
+      for (const s of root.querySelectorAll('span, div, label')) {
+        const t = (s.textContent || '').trim();
+        if (t === 'Sponsored' || t === 'Ad') return true;
+      }
+      return false;
+    };
+    const card = el.closest('[role="article"]');
+    if (card) {
+      if (hasExactBadge(card)) return true;
+      const head = (card.innerText || '').slice(0, 500);
+      if (/\\bSponsored\\b/i.test(head)) return true;
+    }
+    let n = el;
+    for (let i = 0; i < 12 && n; i++) {
+      if (hasExactBadge(n)) return true;
+      n = n.parentElement;
+    }
+    return false;
+  };
+  const out = [];
+  const seen = new Set();
+  document.querySelectorAll('a[href]').forEach((a) => {
+    let h = a.getAttribute('href') || '';
+    const hl = h.toLowerCase();
+    if (!h.includes('/maps') && !hl.includes('maps.google')) return;
+    if (requireSponsored && !looksSponsored(a)) return;
+    if (h.startsWith('/')) {
+      try { h = new URL(h, window.location.href).href; } catch (e) { return; }
+    }
+    if (h.startsWith('//')) h = 'https:' + h;
+    const key = h.split('?')[0];
+    if (seen.has(key)) return;
+    let title = '';
+    const art = a.closest('[role="article"]');
+    const scope = art || a.parentElement;
+    if (scope) {
+      const t = scope.querySelector('h3');
+      if (t) title = (t.innerText || '').trim().split('\\n')[0];
+    }
+    if (title.length < 2) title = (a.innerText || '').trim().split('\\n')[0];
+    if (title.length < 2) return;
+    seen.add(key);
+    out.push({ url: h, display_text: title });
+  });
+  return out;
+}
+"""
 
 
 async def _extract_one_link_from_label(
@@ -524,11 +780,60 @@ async def extract_sponsored_ads(page: Page, search_query: str, logger) -> List[D
                 extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
             )
 
+    classic_count = len(results)
+    places_added = 0
+    if EXTRACT_PLACES_SPONSORED_ENABLED:
+        try:
+            await _scroll_local_carousels(page, EXTRACT_PLACES_SCROLL_ROUNDS)
+            await asyncio.sleep(0.4)
+            await _extract_sponsored_places(
+                page,
+                search_query,
+                seen_urls,
+                results,
+                logger,
+                EXTRACT_PLACES_MAX_LINK_CANDIDATES,
+                EXTRACT_PLACES_REQUIRE_SPONSORED_LABEL,
+            )
+        except Exception as exc:
+            logger.error(
+                f"sponsored places pass failed: {exc}",
+                extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+            )
+        try:
+            raw_places = await page.evaluate(
+                _PLACES_JS_SUPPLEMENT,
+                EXTRACT_PLACES_REQUIRE_SPONSORED_LABEL,
+            )
+            if isinstance(raw_places, list):
+                for item in raw_places:
+                    if not isinstance(item, dict):
+                        continue
+                    href = item.get("url")
+                    display_text = item.get("display_text") or ""
+                    _append_link_if_places(
+                        str(href) if href else None,
+                        str(display_text),
+                        search_query,
+                        seen_urls,
+                        results,
+                    )
+        except Exception as exc:
+            logger.error(
+                f"JS places supplement failed: {exc}",
+                extra={"event_type": "extract_error", "payload": {"error": str(exc)}},
+            )
+
+        places_added = max(0, len(results) - classic_count)
     logger.info(
         "Sponsored extraction completed",
         extra={
             "event_type": "results_extracted",
-            "payload": {"query": search_query, "sponsored_links_found": len(results)},
+            "payload": {
+                "query": search_query,
+                "sponsored_links_found": len(results),
+                "places_links_added": places_added,
+            },
         },
     )
     return results

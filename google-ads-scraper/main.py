@@ -30,7 +30,7 @@ from config import (
 )
 from csv_handler import format_query, load_input_csv, write_results_csv
 from deduplicator import DeduplicationIndex
-from extractors import current_timestamp, extract_domain, extract_website_name
+from extractors import current_timestamp, domain_for_ad_row, extract_website_name
 from scraper import navigate_search_and_extract, open_persistent_session
 from utils import setup_logger
 
@@ -217,7 +217,7 @@ async def run() -> int:
                         new_records = 0
                         for link in outcome["results"]:
                             url = link["url"]
-                            domain = extract_domain(url)
+                            domain = domain_for_ad_row(url)
                             result = {
                                 "profession": profession,
                                 "location": location,
