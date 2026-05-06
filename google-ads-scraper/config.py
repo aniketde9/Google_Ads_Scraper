@@ -25,6 +25,8 @@ EXTRACT_PLACES_SCROLL_ROUNDS = 4
 EXTRACT_PLACES_MAX_LINK_CANDIDATES = 60
 # If True, only keep local/Maps tiles that show a Sponsored (or Ad) disclosure in the card.
 EXTRACT_PLACES_REQUIRE_SPONSORED_LABEL = True
+# Scan each sponsored local card in-page for a real website link (not only visible anchors).
+EXTRACT_PLACES_INPAGE_WEBSITE_SCAN = True
 # After CAPTCHA/consent, re-open SERP if URL is not a Google search page.
 SERP_VERIFY_TIMEOUT_MS = 15000
 SERP_RENAV_MAX_ATTEMPTS = 2

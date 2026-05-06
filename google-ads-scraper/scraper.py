@@ -15,6 +15,7 @@ from config import (
     DATA_TEXT_AD_WAIT_MS,
     EXTRACT_INITIAL_SCROLL_PAUSE_SEC,
     EXTRACT_PAGE_SETTLE_SEC,
+    EXTRACT_PLACES_INPAGE_WEBSITE_SCAN,
     EXTRACT_PLACES_MAX_LINK_CANDIDATES,
     EXTRACT_PLACES_REQUIRE_SPONSORED_LABEL,
     EXTRACT_PLACES_SCROLL_ROUNDS,
@@ -363,6 +364,54 @@ async def _places_link_has_sponsored_disclosure(link, require: bool) -> bool:
         return False
 
 
+# From a Maps tile anchor: find outbound website in the same sponsored card (unwrap /url?q=).
+_EXTRACT_WEBSITE_FROM_PLACES_CARD_JS = """
+(el) => {
+  const article = el.closest('[role="article"]');
+  if (!article) return null;
+  const h3 = article.querySelector('h3');
+  const businessName = (h3 && (h3.innerText || '').trim().split('\\n')[0]) || '';
+  // Skip action labels that point to Maps/calls; keep "Website" — that anchor is usually the real URL.
+  const badLabels = /^(directions?|map(s)?|call|save|share|review(s)?|hours?)$/i;
+  const isMapsOrInternal = (u) => {
+    if (!u) return true;
+    const s = String(u).toLowerCase();
+    return s.includes('google.com/maps') || s.includes('maps.google')
+      || s.includes('/maps/') || s.includes('/maps/dir');
+  };
+  const links = [...article.querySelectorAll('a[href]')];
+  for (const a of links) {
+    let h = (a.getAttribute('href') || '').trim();
+    if (!h || h === '#') continue;
+    if (h.startsWith('/')) {
+      try { h = new URL(h, location.href).href; } catch (e) { continue; }
+    }
+    if (h.startsWith('//')) h = 'https:' + h;
+    const label = (a.innerText || '').trim().split('\\n')[0];
+    if (label && badLabels.test(label)) continue;
+    let outbound = h;
+    if (h.includes('google.com/url') || (h.includes('/url?') && h.includes('q='))) {
+      try {
+        const u = new URL(h, location.href);
+        const q = u.searchParams.get('q') || u.searchParams.get('url');
+        if (q) outbound = q;
+      } catch (e) { continue; }
+    }
+    if (!outbound || !outbound.startsWith('http')) continue;
+    if (isMapsOrInternal(outbound)) continue;
+    if (outbound.toLowerCase().includes('google.com/search')) continue;
+    const ol = outbound.toLowerCase();
+    if (ol.includes('youtube.com') || ol.includes('youtu.be')) continue;
+    const display = businessName.length >= 2 ? businessName
+      : (label && !badLabels.test(label) && label.length >= 2 ? label : '');
+    if (display.length < 2) continue;
+    return { href: h, displayText: display };
+  }
+  return null;
+}
+"""
+
+
 async def _extract_sponsored_places(
     page: Page,
     search_query: str,
@@ -425,9 +474,39 @@ async def _extract_sponsored_places(
                         container = link
 
                 picked = False
-                try:
-                    card_links = await container.locator("a[href]").all()
-                except Exception:
+                if EXTRACT_PLACES_INPAGE_WEBSITE_SCAN:
+                    try:
+                        website_pick = await link.evaluate(
+                            _EXTRACT_WEBSITE_FROM_PLACES_CARD_JS
+                        )
+                    except Exception:
+                        website_pick = None
+                    if (
+                        website_pick
+                        and isinstance(website_pick, dict)
+                        and website_pick.get("href")
+                    ):
+                        disp = (
+                            (website_pick.get("displayText") or title or "")
+                            .strip()
+                        )
+                        if len(disp) < 2:
+                            disp = title if len(title) >= 2 else "Place"
+                        before = len(results)
+                        _append_link_if_sponsored(
+                            str(website_pick["href"]),
+                            disp,
+                            search_query,
+                            seen_urls,
+                            results,
+                        )
+                        picked = len(results) > before
+                if not picked:
+                    try:
+                        card_links = await container.locator("a[href]").all()
+                    except Exception:
+                        card_links = []
+                else:
                     card_links = []
                 for al in card_links:
                     try:
