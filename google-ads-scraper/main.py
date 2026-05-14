@@ -61,6 +61,8 @@ async def run() -> int:
     )
 
     rows = load_input_csv(INPUT_FILE)
+    # Fresh output file (header only) so each run clears prior results.csv immediately.
+    write_results_csv(OUTPUT_FILE, defaultdict(list))
     all_results: Dict[str, List[Dict[str, str]]] = defaultdict(list)
     dedupe = DeduplicationIndex()
     first_result_by_domain: Dict[str, Dict[str, str]] = {}
@@ -107,19 +109,6 @@ async def run() -> int:
 
                 try:
                     for iteration in range(1, ITERATIONS_PER_QUERY + 1):
-                        logger.info(
-                            "Query started",
-                            extra={
-                                "event_type": "query_started",
-                                "payload": {
-                                    "profession": profession,
-                                    "location": location,
-                                    "pincode": pincode,
-                                    "iteration": iteration,
-                                },
-                            },
-                        )
-
                         if PERSISTENT_MODE:
                             outcome = {"results": [], "captcha": False, "error": ""}
                             for attempt in range(1, PERSISTENT_NAV_RETRIES + 1):
@@ -135,12 +124,11 @@ async def run() -> int:
                                         "error": str(exc),
                                     }
                                     logger.error(
-                                        f"Persistent search failed on attempt {attempt}",
+                                        "Persistent search failed; retrying",
                                         extra={
                                             "event_type": "search_error",
                                             "payload": {
                                                 "query": search_query,
-                                                "iteration": iteration,
                                                 "attempt": attempt,
                                                 "error": str(exc),
                                             },
@@ -163,12 +151,11 @@ async def run() -> int:
                                         "error": str(exc),
                                     }
                                     logger.error(
-                                        f"Per-query search failed on attempt {attempt}",
+                                        "Per-query search failed; retrying",
                                         extra={
                                             "event_type": "search_error",
                                             "payload": {
                                                 "query": search_query,
-                                                "iteration": iteration,
                                                 "attempt": attempt,
                                                 "error": str(exc),
                                             },
@@ -185,7 +172,6 @@ async def run() -> int:
                                     "payload": {
                                         "error_type": "NOT_ON_SEARCH_PAGE",
                                         "query": search_query,
-                                        "iteration": iteration,
                                     },
                                 },
                             )
@@ -200,7 +186,6 @@ async def run() -> int:
                                     "payload": {
                                         "error_type": "CAPTCHA",
                                         "query": search_query,
-                                        "iteration": iteration,
                                         "captcha_count": captcha_count,
                                     },
                                 },
@@ -213,12 +198,12 @@ async def run() -> int:
                                         "payload": {"cooldown_seconds": CAPTCHA_COOLDOWN},
                                     },
                                 )
+                                write_results_csv(OUTPUT_FILE, all_results)
                                 await asyncio.sleep(CAPTCHA_COOLDOWN)
                                 return 1
                             await asyncio.sleep(CAPTCHA_COOLDOWN)
                             continue
 
-                        new_records = 0
                         for link in outcome["results"]:
                             url = link["url"]
                             domain = domain_for_ad_row(url)
@@ -240,23 +225,10 @@ async def run() -> int:
                                 result["appearance_count"] = str(appearance_count)
                                 all_results[location].append(result)
                                 first_result_by_domain[domain_key] = result
-                                new_records += 1
                             else:
                                 existing_result = first_result_by_domain.get(domain_key)
                                 if existing_result:
                                     existing_result["appearance_count"] = str(appearance_count)
-
-                        logger.info(
-                            "Iteration completed",
-                            extra={
-                                "event_type": "results_extracted",
-                                "payload": {
-                                    "query": search_query,
-                                    "sponsored_links_found": len(outcome["results"]),
-                                    "unique_new_records": new_records,
-                                },
-                            },
-                        )
 
                         await asyncio.sleep(
                             random.uniform(
@@ -288,13 +260,27 @@ async def run() -> int:
                             },
                         )
                         await asyncio.sleep(30)
+
+                write_results_csv(OUTPUT_FILE, all_results)
+                logger.info(
+                    "Pincode row completed; results snapshot written",
+                    extra={
+                        "event_type": "pincode_row_completed",
+                        "payload": {
+                            "profession": profession,
+                            "location": location,
+                            "pincode": pincode,
+                            "rows_for_location": len(all_results[location]),
+                            "total_rows": sum(len(v) for v in all_results.values()),
+                        },
+                    },
+                )
         finally:
             if persistent_context:
                 await persistent_context.close()
             if shared_browser:
                 await shared_browser.close()
 
-    write_results_csv(OUTPUT_FILE, all_results)
     logger.info(
         "Scrape completed",
         extra={

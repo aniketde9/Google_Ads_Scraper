@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import os
 import urllib.parse
 from pathlib import Path
 from typing import Dict, List
@@ -54,8 +55,14 @@ def format_query(profession: str, location: str, pincode: str) -> str:
 
 
 def write_results_csv(output_file: str, all_results: Dict[str, List[Dict[str, str]]]) -> None:
-    """Write output rows sorted by location then domain."""
+    """Write full snapshot: header plus rows sorted by location then domain.
+
+    Opens in ``w`` (truncates), writes atomically from the caller's perspective,
+    then flushes and fsyncs so another process or Excel refresh sees completed
+    rows after each pincode when this is called incrementally from ``main``.
+    """
     path = Path(output_file)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=OUTPUT_HEADERS)
         writer.writeheader()
@@ -64,3 +71,8 @@ def write_results_csv(output_file: str, all_results: Dict[str, List[Dict[str, st
             location_results = sorted(all_results[location], key=lambda row: row["domain"])
             for result in location_results:
                 writer.writerow(result)
+        handle.flush()
+        try:
+            os.fsync(handle.fileno())
+        except OSError:
+            pass

@@ -95,12 +95,13 @@ async def _goto_with_retries(
         except Exception as exc:
             last_exc = exc
             logger.warning(
-                f"{context}: goto failed (attempt {attempt}/{NAV_GOTO_MAX_ATTEMPTS}): {exc}",
+                f"{context}: goto failed; retrying",
                 extra={
                     "event_type": "nav_retry",
                     "payload": {
                         "context": context,
                         "attempt": attempt,
+                        "max_attempts": NAV_GOTO_MAX_ATTEMPTS,
                         "error": str(exc),
                         "url_preview": (url or "")[:160],
                     },
@@ -665,7 +666,7 @@ async def ensure_on_google_serp(
                 page,
                 target,
                 logger,
-                context=f"SERP re-navigation ({attempt}/{SERP_RENAV_MAX_ATTEMPTS})",
+                context="SERP re-navigation",
             )
             try:
                 await page.wait_for_url("**/search**", timeout=SERP_VERIFY_TIMEOUT_MS)
@@ -997,7 +998,7 @@ def _new_context_options() -> dict:
 
 
 async def navigate_search_and_extract(
-    page: Page, search_query: str, iteration: int, logger
+    page: Page, search_query: str, _iteration: int, logger
 ) -> Dict[str, object]:
     """Load Google SERP on an existing page, handle CAPTCHA, return sponsored links."""
     url = f"https://www.google.com/search?q={search_query}&hl=en&gl=us"
@@ -1005,7 +1006,7 @@ async def navigate_search_and_extract(
         page,
         url,
         logger,
-        context=f"SERP load (iteration {iteration})",
+        context="SERP load",
     )
     await _humanize_after_navigation(page)
 
@@ -1100,12 +1101,11 @@ async def run_browser_search(
         except Exception as exc:
             last_error = str(exc)
             logger.error(
-                f"Search failed on attempt {attempt}",
+                "Search failed; retrying",
                 extra={
                     "event_type": "search_error",
                     "payload": {
                         "query": search_query,
-                        "iteration": iteration,
                         "attempt": attempt,
                         "error": last_error,
                     },
